@@ -1,0 +1,96 @@
+{
+  "id_LC11F": {
+    "key": "id_LC11F",
+    "name": "Player",
+    "playerId": "LC11F",
+    "pfp": "",
+    "email": "",
+    "isGoogle": false,
+    "uid": "",
+    "lastSeen": 1794797202796,
+    "status": "active",
+    "pendingGifts": []
+  },
+  "g_pKFltjVjqDTDZZEbW6FPrxx7wZo1": {
+    "key": "g_pKFltjVjqDTDZZEbW6FPrxx7wZo1",
+    "name": "$Techno_(King$",
+    "playerId": "KZA1F",
+    "pfp": "data:image/jpeg;base64,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",
+    "email": "technowarrior924@gmail.com",
+    "isGoogle": true,
+    "uid": "pKFltjVjqDTDZZEbW6FPrxx7wZo1",
+    "lastSeen": 1794797247262,
+    "status": "active",
+    "pendingGifts": []
+  },
+  "id_VG7OS": {
+    "key": "id_VG7OS",
+    "name": "Player",
+    "playerId": "VG7OS",
+    "pfp": "",
+    "email": "",
+    "isGoogle": false,
+    "uid": "",
+    "lastSeen": 1794665336597,
+    "status": "active"
+  },
+  "g_alhUaXDIHfMGHPRHsqiARRaUynf1": {
+    "key": "g_alhUaXDIHfMGHPRHsqiARRaUynf1",
+    "name": "Nevergiveup",
+    "playerId": "DCK88",
+    "pfp": "https://lh3.googleusercontent.com/a/ACg8ocLJ8E52rzueVo_otZIZgPCj0PA1zWAlzdWnNI2iirsxcXW-=s96-c",
+    "email": "cloudlinqlysolution@gmail.com",
+    "isGoogle": true,
+    "uid": "alhUaXDIHfMGHPRHsqiARRaUynf1",
+    "lastSeen": 1794670114050,
+    "status": "active"
+  },
+  "id_98YIY": {
+    "key": "id_98YIY",
+    "name": "Player",
+    "playerId": "98YIY",
+    "pfp": "",
+    "email": "",
+    "isGoogle": false,
+    "uid": "",
+    "lastSeen": 1794737899761,
+    "status": "active",
+    "pendingGifts": []
+  },
+  "g_FgTiUihb9wcRYc11QlUeiWKqXvf2": {
+    "key": "g_FgTiUihb9wcRYc11QlUeiWKqXvf2",
+    "name": "Loop",
+    "playerId": "ALIWO",
+    "pfp": "https://lh3.googleusercontent.com/a/ACg8ocICZKecsDIh_z1Ppn1AOms48jmqqng5TmwSpw2xdrvrSJ6mxGOU=s96-c",
+    "email": "muskaneman31@gmail.com",
+    "isGoogle": true,
+    "uid": "FgTiUihb9wcRYc11QlUeiWKqXvf2",
+    "lastSeen": 1794739125713,
+    "status": "active",
+    "pendingGifts": []
+  },
+  "id_YG4QF": {
+    "key": "id_YG4QF",
+    "name": "Player",
+    "playerId": "YG4QF",
+    "pfp": "",
+    "email": "",
+    "isGoogle": false,
+    "uid": "",
+    "lastSeen": 1794796556234,
+    "status": "active",
+    "pendingGifts": []
+  },
+  "id_8XXCP": {
+    "key": "id_8XXCP",
+    "name": "Player_141",
+    "playerId": "8XXCP",
+    "pfp": "",
+    "email": "",
+    "isGoogle": false,
+    "uid": "",
+    "lastSeen": 1794796563165,
+    "status": "active",
+    "pendingGifts": []
+  }
+}
