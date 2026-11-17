@@ -1,0 +1,13 @@
+{
+  "requests": [],
+  "friendships": {
+    "g_gQaHTnJPMHZzXMJu8ssFgiCB7iy2": [],
+    "g_TztUCm0sQafETp22W9ibcCwFCAY2": [
+      "g_btqTnjV3AvZhg1FzFfLjgKwFTML2"
+    ],
+    "g_uGqwOSIxkWePApelWtt0MXcuXMj2": [],
+    "g_btqTnjV3AvZhg1FzFfLjgKwFTML2": [
+      "g_TztUCm0sQafETp22W9ibcCwFCAY2"
+    ]
+  }
+}

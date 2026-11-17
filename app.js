@@ -2,7 +2,7 @@
 let scene, camera, renderer, clock;
 let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
 let isCrouching = false;
-let canJump = false;
+let canJump = true; // true se shuru (spawn landing nahi — pehle jump karo, phir bhop).
 let velocity = new THREE.Vector3();
 // 💪 PUSHUPS (P dabaye rakho) — banda pushups lagata hai, gun gayab;
 // P choro to gun wapis aur banda khada. Doosre players ko bhi dikhta hai
@@ -16,9 +16,13 @@ let pushupPhase = 0; // Pushup up/down rhythm.
 let bhopLandUntil = 0;       // Land karne ke baad Shift dabane ka window (ms).
 let bhopTapArmed = false;    // Land ke foran baad Shift daba tha (tap armed).
 let bhopJumpUntil = 0;       // Shift chorne ke baad jump dabane ka window (ms).
+let bhopArmTime = 0;         // Shift kab daba tha (bhop arm ka waqt).
+let bhopBoostUntil = 0;      // 🌙 Moon jump ke baad directional push ka waqt.
 const MOON_JUMP_VELOCITY = 14; // Moon jump ki taqat (normal jump 8.5).
 const BHOP_LAND_WINDOW_MS = 300; // Land ke baad Shift dabane ka time.
 const BHOP_JUMP_WINDOW_MS = 250; // Shift chorne ke baad jump dabane ka time.
+const BHOP_BOOST_MS = 500; // Moon jump ke baad directional push kitni der (ms).
+const BHOP_BOOST_MULT = 1.8; // Moon jump ke baad speed kitni (1.8x).
 
 // Player Controls & Stats
 let playerHeight = 1.62; 
@@ -51,8 +55,8 @@ let isDeadLocal = false;
 let playerName = "Player";
 let gameStarted = false;
 
-// 🆔 PLAYER ID + 🌍 W.W.P — har player ki alag 5-char ID (# ke saath,
-// letters + numbers mix, jaise #X7K2M), per-account save (skin ki tarah).
+// 🆔 PLAYER ID + 🌍 W.W.P — har player ki alag 6-digit NUMERIC ID (# ke saath,
+// sirf numbers, jaise #483920), per-account save (skin ki tarah).
 // W.W.P (World Wide Players) admin panel me online players dikhte hain.
 // (TDZ: ye lets file ke upar hain — init() jaldi chalta hai.)
 let myPlayerId = '';
@@ -64,6 +68,31 @@ let currentGooglePhotoURL = '';
 let wwpPopupKey = null; // kis player ka popup khula hai (regKey)
 let amBanned = false; // admin ne mujhe ban kiya hai
 let amDisabled = false; // admin ne mujhe disable kiya hai
+// 👥 FRIENDS — doston ki list + friend requests (server se aati hain).
+let friendsOpen = false; // Friends panel khula hai?
+let friendsList = []; // mere friends [{key,name,playerId,pfp,online,inGame}]
+let pendingRemoveFriend = null; // Remove confirm popup me kis ko remove karna hai.
+// 👥 SHARED LOBBY — dost ki lobby me khada hona (apna character beech me,
+// dost ka side pe). lobbyHostKey = kis ki lobby me ho (null = apni khud ki).
+let lobbyMembers = []; // lobby group ke doosre members [{key,name,playerId,pfp,skin,gun1,ready}]
+let lobbyHostKey = null;
+let lobbyYouAreHost = false;
+let lobbySideChars = {}; // key -> {group, nameTag}
+// ✅ READY — lobby me PLAY ke liye sab ready hone chahiye (agar aur log bhi hain).
+let myReady = false;
+let partyPlayPending = false;
+const LOBBY_SIDE_X = [1.33, -1.5, 3.0, -3.0, 4.5, -4.5]; // side characters ki jagah (beech me apna).
+const LOBBY_SIDE_Z = [-1.02, 0, 0, 0, 0, 0]; // side characters ki aage/peeche jagah (Jimmy ka default, 2026-11-17).
+// 👥 SIDE CHARACTER EDIT (admin only) — side character ki size/turn/position.
+// Jimmy (admin) inhe theek karke COPY SIDE LAYOUT se bhejega, main default kar dunga.
+const DEFAULT_SIDE_CHAR_SIZE = 0.7; // Jimmy ka default (2026-11-17)
+const DEFAULT_SIDE_CHAR_TURN = 0.45; // beech ki taraf murna (radian) — Jimmy ka default (2026-11-17)
+let sideCharSize = DEFAULT_SIDE_CHAR_SIZE;
+let sideCharTurn = DEFAULT_SIDE_CHAR_TURN;
+let sideCharDragging = null; // {slot, startX, startZ, startPlaneX, startPlaneZ, moved}
+let sideCharDragWired = false;
+let friendRequests = []; // mujhe aayi requests [{key,name,playerId,pfp,online}]
+let friendsTab = 'friends'; // kaunsa tab dikhe: 'friends' ya 'requests'
 
 // ⭐ LEVEL SYSTEM — Kill = 100 XP, Death = 10 XP. Level N se N+1 ke liye
 // 100*N XP chahiye (L1->2: 100, L2->3: 200, L3->4: 300...). XP har
@@ -151,6 +180,64 @@ let isAiming = false;
 const normalFOV = 90;
 const aimedFOV = 60;
 
+// 🔭 VITA SCOPE — right-click hold par asli sniper jaisa scope.
+// Sirf VITA (slot 1) ke liye; AR-9/Pistol/Knife par halka ADS (FOV 60) hi rehta hai.
+let isScoped = false;
+const scopeFOV = 22; // 🔭 Scope zoom (90 → 22, ~4x).
+// Scope overlay banao (ek hi baar) — gol khidki + crosshair + mil-dots.
+function ensureScopeOverlay() {
+    if (typeof document === 'undefined') return null;
+    let el = document.getElementById('sniper-scope');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'sniper-scope';
+    el.style.cssText = 'position:fixed;inset:0;z-index:200;pointer-events:none;display:none;';
+    // Mil-dots: crosshair par chhote dots (asli sniper scope jaisa).
+    let dots = '';
+    [-24, -16, -8, 8, 16, 24].forEach((o) => {
+        dots += '<div style="position:absolute;left:calc(50% + ' + o + 'vmin);top:50%;width:5px;height:5px;transform:translate(-50%,-50%);border-radius:50%;background:#000;"></div>';
+        dots += '<div style="position:absolute;left:50%;top:calc(50% + ' + o + 'vmin);width:5px;height:5px;transform:translate(-50%,-50%);border-radius:50%;background:#000;"></div>';
+    });
+    el.innerHTML =
+        // Kaala background, beech me gol khidki (scope se dekho).
+        '<div style="position:absolute;inset:0;background:radial-gradient(circle at 50% 50%, transparent 0, transparent 33.5vmin, rgba(0,0,0,0.98) 34.5vmin, #000 100%);"></div>' +
+        // Scope ki gol ring.
+        '<div style="position:absolute;left:50%;top:50%;width:68vmin;height:68vmin;transform:translate(-50%,-50%);border-radius:50%;border:3px solid rgba(15,15,15,0.95);box-shadow:0 0 0 2px rgba(255,255,255,0.07), inset 0 0 40px rgba(0,0,0,0.55);"></div>' +
+        // Crosshair: horizontal + vertical lines.
+        '<div style="position:absolute;left:50%;top:50%;width:68vmin;height:2px;transform:translate(-50%,-50%);background:#000;"></div>' +
+        '<div style="position:absolute;left:50%;top:50%;width:2px;height:68vmin;transform:translate(-50%,-50%);background:#000;"></div>' +
+        dots +
+        // Beech ka dot.
+        '<div style="position:absolute;left:50%;top:50%;width:6px;height:6px;transform:translate(-50%,-50%);border-radius:50%;background:#000;"></div>';
+    document.body.appendChild(el);
+    return el;
+}
+// 🔭 Scope on/off — overlay + FOV zoom + gun/crosshair chhupao.
+function setScope(on) {
+    if (on) {
+        if (isScoped) return;
+        isScoped = true;
+        const el = ensureScopeOverlay();
+        if (el) el.style.display = 'block';
+        try { camera.fov = scopeFOV; camera.updateProjectionMatrix(); } catch (e) {}
+        // Scope se dekhte waqt gun nahi dikhti (asli sniper jaisa).
+        try { if (gun) gun.visible = false; if (pistol) pistol.visible = false; if (knife) knife.visible = false; } catch (e) {}
+        try { const ch = document.getElementById('crosshair'); if (ch) ch.style.display = 'none'; } catch (e) {}
+    } else {
+        if (!isScoped) return;
+        isScoped = false;
+        try { const el = document.getElementById('sniper-scope'); if (el) el.style.display = 'none'; } catch (e) {}
+        try { camera.fov = normalFOV; camera.updateProjectionMatrix(); } catch (e) {}
+        // Gun wapas — pushups me gun nahi dikhti (wahi rule).
+        try {
+            if (gun) gun.visible = (currentWeapon === 1) && !isDoingPushups;
+            if (pistol) pistol.visible = (currentWeapon === 2) && !isDoingPushups;
+            if (knife) knife.visible = (currentWeapon === 3) && !isDoingPushups;
+        } catch (e) {}
+        try { const ch = document.getElementById('crosshair'); if (ch) ch.style.display = ''; } catch (e) {}
+    }
+}
+
 let headBobTimer = 0;
 const bobFrequency = 10; // Gun bob ki speed (steps/sec jaisi).
 const bobAmplitude = 0.05; // Gun bob ki height (0.05 = halki si harkat).
@@ -164,6 +251,8 @@ let viewBobAmount = 0; // 0 = khara (no bob), 1 = pura bob (smooth lerp).
 // Sirf apni screen par (camera rotation + render-time Y offset);
 // dusre players ko hamari screen ka bob nahi dikhta.
 let camBobAmount = 0; // 0 = khara, 1 = pura bob (smooth lerp).
+let landShake = 0; // 📷 Landing shake (0..1) — jump ke baad land par camera halka shake.
+let landShakePhase = 0; // 📷 Landing shake ki oscillation phase.
 
 let targets = [];
 let bloodParticles = [];
@@ -360,6 +449,11 @@ try {
         if (!isNaN(savedLobbyGunZ)) lobbyGunZ = Math.min(1, Math.max(0.3, savedLobbyGunZ));
         const savedGunScale = parseFloat(localStorage.getItem('pointerx_lobby_gun_scale'));
         if (!isNaN(savedGunScale)) lobbyGunScale = Math.min(2, Math.max(0.5, savedGunScale));
+        // 👥 Side character (joined friend) ki size/turn — admin ki saved values.
+        const savedSideSize = parseFloat(localStorage.getItem('pointerx_lobby_side_size'));
+        if (!isNaN(savedSideSize) && savedSideSize >= 0.3 && savedSideSize <= 1) sideCharSize = savedSideSize;
+        const savedSideTurn = parseFloat(localStorage.getItem('pointerx_lobby_side_turn'));
+        if (!isNaN(savedSideTurn) && savedSideTurn >= -1.5 && savedSideTurn <= 1.5) sideCharTurn = savedSideTurn;
         const savedCrouchHip = parseFloat(localStorage.getItem('pointerx_crouch_hip'));
         if (!isNaN(savedCrouchHip)) crouchHip = Math.min(1.2, Math.max(0, savedCrouchHip));
         const savedCrouchKnee = parseFloat(localStorage.getItem('pointerx_crouch_knee'));
@@ -629,7 +723,10 @@ function setupExitButton() {
 
 function exitToLobby() {
     try { document.exitPointerLock(); } catch (e) {}
+    if (isScoped) setScope(false); // 🔭 Lobby wapis to scope band karo.
     gameStarted = false;
+    // 🎮 Friends ko batao: main lobby me wapis aa gaya (unki list me 'Lobby me' dikhega).
+    try { socket.emit('playerState', { inGame: false }); } catch (e) {}
     isLocked = false;
     isDeadLocal = false;
     isMouseHeld = false;
@@ -1137,11 +1234,15 @@ function createLobbyCharacter() {
         lobbyScene.add(group);
         lobbyCharacter = group;
         applyLobbyCrouchPose();
+        // 👥 Shared lobby — dost pehle se meri lobby me ho to side pe khade karo.
+        try { renderLobbySideChars(); } catch (e) {}
     } catch (e) {}
 }
 
 function removeLobbyCharacter() {
     try {
+        // 👥 Shared lobby — side characters bhi hatao.
+        try { clearLobbySideChars(); } catch (e) {}
         if (lobbyCharacter && lobbyScene) lobbyScene.remove(lobbyCharacter);
         if (lobbyCharacter && scene) scene.remove(lobbyCharacter);
         lobbyCharacter = null;
@@ -1466,18 +1567,34 @@ function setSkinAccount(id) {
 // 🆔 PLAYER ID — 5 characters (A-Z + 0-9 mix), '#' ke saath dikhti hai
 // (jaise #X7K2M). Har account ki apni ID (skin/XP ki tarah per-account
 // key me save), ek baar bani to wahi rehti hai — dobara login par nayi nahi.
-const PLAYER_ID_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+// 🆔 Player ID — sirf NUMBERS, 6 digits (100000–999999). Har player ki alag;
+// server registry check karta hai — takrao ho to 'playerIdTaken' se nayi banti hai.
 function playerIdKey() { return (typeof skinAccountId !== 'undefined' && skinAccountId) ? ('pointerx_playerid_' + skinAccountId) : 'pointerx_playerid_v1'; }
+// Guest ka stable browser UID — server pe alag pehchan ke liye.
+// Google players ka uid Firebase se aata hai; guests ke liye ye random ID hai
+// (ek dafa bani to wahi rehti hai). Is se server do guests ki ek jaisi ID
+// pakad sakta hai — bina is ke guest ki key khud uski ID hoti ('id_<pid>'),
+// to doosra guest usi ID se pehle wale ki entry overwrite kar deta.
+function getGuestUid() {
+    try {
+        const k = 'pointerx_guestuid_' + (typeof skinAccountId !== 'undefined' && skinAccountId ? skinAccountId : 'v1');
+        let u = '';
+        try { u = localStorage.getItem(k) || ''; } catch (e) {}
+        if (!/^[A-Za-z0-9]{10,}$/.test(u)) {
+            u = 'g' + Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 12);
+            try { localStorage.setItem(k, u); } catch (e) {}
+        }
+        return u;
+    } catch (e) { return 'g' + Math.random().toString(36).slice(2, 12); }
+}
 function generatePlayerId() {
-    let id = '';
-    for (let i = 0; i < 5; i++) id += PLAYER_ID_CHARS[Math.floor(Math.random() * PLAYER_ID_CHARS.length)];
-    return id;
+    return String(100000 + Math.floor(Math.random() * 900000));
 }
 function loadMyPlayerId() {
     try {
         let saved = '';
         try { saved = localStorage.getItem(playerIdKey()) || ''; } catch (e) {}
-        if (!/^[A-Z0-9]{5}$/.test(saved)) {
+        if (!/^[0-9]{6}$/.test(saved)) {
             saved = generatePlayerId();
             try { localStorage.setItem(playerIdKey(), saved); } catch (e) {}
         }
@@ -1487,7 +1604,7 @@ function loadMyPlayerId() {
     return myPlayerId;
 }
 function getMyPlayerId() {
-    if (!myPlayerId || !/^[A-Z0-9]{5}$/.test(myPlayerId) || myPlayerIdAccount !== skinAccountId) loadMyPlayerId();
+    if (!myPlayerId || !/^[0-9]{6}$/.test(myPlayerId) || myPlayerIdAccount !== skinAccountId) loadMyPlayerId();
     return myPlayerId;
 }
 // Lobby player card me apni #ID dikhao.
@@ -1714,7 +1831,7 @@ function sendMyProfileToServer() {
             pfp: myProfilePfp(),
             email: (typeof currentGoogleEmail !== 'undefined' ? currentGoogleEmail : ''),
             isGoogle: !!(typeof currentGoogleEmail !== 'undefined' && currentGoogleEmail),
-            uid: (typeof currentGoogleUid !== 'undefined' ? currentGoogleUid : '')
+            uid: (typeof currentGoogleUid !== 'undefined' && currentGoogleUid ? currentGoogleUid : getGuestUid())
         });
     } catch (e) {}
 }
@@ -1742,7 +1859,7 @@ function mergeWWPList(list) {
         // kabhi UNBAN/ENABLE nahi banta. Purana server status na bheje to
         // backup wala status rehne do (active se overwrite mat karo).
         const prev = wwpPermanent[k] || {};
-        wwpPermanent[k] = { key: k, name: p.name || 'Player', playerId: p.playerId || '?????', pfp: p.pfp || '', email: p.email || '', isGoogle: !!p.isGoogle, online: !!p.online, lastSeen: p.lastSeen || Date.now(), status: (p.status ? String(p.status) : (prev.status || 'active')) };
+        wwpPermanent[k] = { key: k, name: p.name || 'Player', playerId: p.playerId || '??????', pfp: p.pfp || '', email: p.email || '', isGoogle: !!p.isGoogle, online: !!p.online, lastSeen: p.lastSeen || Date.now(), status: (p.status ? String(p.status) : (prev.status || 'active')) };
         seen[k] = true;
     });
     // Jo backup me hai lekin server list me nahi — offline dikhao.
@@ -1791,7 +1908,7 @@ function renderWWPList() {
     }
     listEl.innerHTML = rows.map((p) => {
         const nm = String(p.name || 'Player');
-        const pid = String(p.playerId || '?????');
+        const pid = String(p.playerId || '??????');
         // Gmail ID NAHI dikhani (Jimmy) — sirf Google ya Guest.
         const prof = p.isGoogle ? 'Google' : 'Guest';
         const pfp = String(p.pfp || '');
@@ -1965,13 +2082,17 @@ function setPlayButtonLabel(btn, label) {
 function updatePlayButtonsDisabled() {
     if (typeof document === 'undefined') return;
     const blocked = amBanned || amDisabled;
-    const label = amBanned ? '🚫 BANNED' : amDisabled ? '⛔ DISABLED' : 'PLAY';
+    let label = amBanned ? '🚫 BANNED' : amDisabled ? '⛔ DISABLED' : 'PLAY';
+    // 👥 Lobby me aur log hain aur sab ready nahi — PLAY block (READY ka wait).
+    const groupBlocked = !blocked && lobbyGroupHasOthers() && !lobbyGroupAllReady();
+    if (groupBlocked) label = '⏳ WAIT...';
     ['join-btn', 'start-google-game'].forEach((id) => {
         const btn = document.getElementById(id);
         if (!btn) return;
-        try { btn.disabled = blocked; } catch (e) {}
-        btn.style.opacity = blocked ? '0.45' : '';
-        btn.style.cursor = blocked ? 'not-allowed' : '';
+        const dis = blocked || groupBlocked;
+        try { btn.disabled = dis; } catch (e) {}
+        btn.style.opacity = dis ? '0.45' : '';
+        btn.style.cursor = dis ? 'not-allowed' : '';
         setPlayButtonLabel(btn, label);
     });
 }
@@ -1980,7 +2101,7 @@ function renderWWPPlayerPopup(p) {
     const body = document.getElementById('wwp-popup-body');
     if (!body) return;
     const nm = String(p.name || 'Player');
-    const pid = String(p.playerId || '?????');
+    const pid = String(p.playerId || '??????');
     const pfp = String(p.pfp || '');
     const st = String(p.status || 'active');
     const isBanned = st === 'banned';
@@ -2677,7 +2798,7 @@ function restoreLobbyCard() {
 }
 function toggleLobbyCard() {
     if (!isModEmail()) return; // sirf mod Gmail — dusri Gmail/guest par G kuch nahi karega
-    if (skinEditorOpen || inventoryOpen || storeOpen) return; // skin/inventory/store khula ho to G na chale
+    if (skinEditorOpen || inventoryOpen || storeOpen || friendsOpen) return; // skin/inventory/store/friends khula ho to G na chale
     lobbyCardVisible = !lobbyCardVisible;
     restoreLobbyCard();
 }
@@ -2765,7 +2886,8 @@ function updateLobbyCharName() {
     if (!el) return;
     let n = '';
     try { n = currentLobbyName(); } catch (e) { n = (typeof playerName !== 'undefined') ? playerName : ''; }
-    el.textContent = n || 'Player';
+    // ✅ Ready ho to naam ke saath check, warna cross.
+    el.textContent = (n || 'Player') + (myReady ? ' ✅' : ' ❌');
 }
 function startLobbyCharNameEdit() {
     const wrap = document.getElementById('lobby-char-name');
@@ -2931,18 +3053,18 @@ function handlePFPUpload(file) {
 // 🖱️ LOBBY DRAG & DROP — Jimmy khud lobby ke panels ki position set kar sake.
 // Har panel ki position localStorage me save hoti hai (pointerx_lobby_pos_<key>).
 // COPY LAYOUT se positions copy karke bhej do — main unhe file me default kar dunga.
-const LOBBY_PANEL_KEYS = ['card', 'title'];
+const LOBBY_PANEL_KEYS = ['card', 'title', 'friends', 'inventory', 'store', 'skins'];
 // Left panel ka container hata diya — uski har cheez ab alag item hai.
 // Right panel bhi hata diya — HOW TO PLAY + PRIVATE/JOIN/PLAY SETTINGS
 // ab alag items hain (neeche LOBBY_ITEM_KEYS me).
-const LOBBY_ITEM_KEYS = ['playercard','menu_HUB','menu_STORE','menu_SERVERS','menu_QUESTS','menu_FRIENDS','menu_INVENTORY','menu_EDITOR','menu_SKINS','copy_layout','reset_layout','logout','pfp','play','private','join','play_settings','charname','wwp'];
+const LOBBY_ITEM_KEYS = ['playercard','menu_HUB','menu_STORE','menu_SERVERS','menu_QUESTS','menu_FRIENDS','menu_INVENTORY','menu_EDITOR','menu_SKINS','copy_layout','reset_layout','logout','pfp','play','ready','private','join','play_settings','charname','wwp'];
 // 🎨 Jimmy ki layout — COPY LAYOUT se bheji hui positions, file me default.
 // Agar browser me koi saved position nahi hai, to ye use hoti hai.
 // (Jimmy ne 2026-11-09 ko bheji — 4th layout: card (459,264, 564 wide),
 // COPY LAYOUT + LOG OUT top-right, PFP (282,11, 66 tall), baaki waisa hi.)
 const DEFAULT_LOBBY_LAYOUT = {
-    card: { left: 459, top: 264, width: 564 },
-    title: { left: 646, top: 20 },
+    card: { left: 937, top: 99, width: 564 },
+    title: { left: 697, top: 43, width: 360 },
     item_playercard: { left: 5, top: 12, height: 146, width: 369 },
     item_menu_HUB: { left: 14, top: 232, height: 46, width: 221 },
     item_menu_STORE: { left: 12, top: 286, height: 42, width: 225 },
@@ -2952,16 +3074,21 @@ const DEFAULT_LOBBY_LAYOUT = {
     item_menu_INVENTORY: { left: 17, top: 452, height: 35, width: 170 },
     item_menu_EDITOR: { left: 18, top: 488, height: 120, width: 120 },
     item_menu_SKINS: { left: 16, top: 492, height: 35, width: 170 },
-    item_copy_layout: { left: 1486, top: 40, height: 53, width: 114 },
-    item_reset_layout: { left: 22, top: 564, height: 28, width: 170 },
-    item_logout: { left: 1490, top: 2, height: 35, width: 110 },
-    item_pfp: { left: 282, top: 11, height: 66, width: 80 },
-    item_play: { left: 12, top: 603, height: 70, width: 269 },
+    item_copy_layout: { left: 1486, top: 123, height: 53, width: 114 },
+    item_reset_layout: { left: 1430, top: 701, height: 28, width: 170 },
+    item_logout: { left: 1490, top: 95, height: 35, width: 110 },
+    item_pfp: { left: 1520, top: 7, height: 66, width: 80 },
+    item_play: { left: 18, top: 604, height: 70, width: 269 },
+    item_ready: { left: 300, top: 604, height: 70, width: 200 },
     item_private: { left: 96, top: 678, height: 43, width: 80 },
     item_join: { left: 14, top: 677, height: 44, width: 80 },
     item_play_settings: { left: 175, top: 677, height: 46, width: 102 },
-    item_charname: { left: 700, top: 150, height: 36, width: 200 },
-    item_wwp: { left: 1000, top: 120, height: 400, width: 340 }
+    item_charname: { left: 701, top: 177, height: 36, width: 200 },
+    item_wwp: { left: 1151, top: 304, height: 721, width: 284 },
+    friends: { left: 295, top: 6, width: 1021, height: 704 },
+    inventory: { left: 295, top: 6, width: 1021, height: 704 },
+    store: { left: 295, top: 6, width: 1021, height: 704 },
+    skins: { left: 295, top: 6, width: 1021, height: 704 }
 };
 function getLobbyPanelPos(key) {
     try {
@@ -2989,6 +3116,14 @@ function clearLobbyPanelPos() {
     LOBBY_PANEL_KEYS.forEach((k) => { try { localStorage.removeItem('pointerx_lobby_pos_' + k); } catch (e) {} });
     LOBBY_ITEM_KEYS.forEach((k) => { try { localStorage.removeItem('pointerx_lobby_pos_item_' + k); } catch (e) {} });
     try { localStorage.removeItem('pointerx_lobby_pos_left'); } catch (e) {}
+    // 👥 Side character ki saved settings bhi clear (default wapas).
+    try {
+        localStorage.removeItem('pointerx_lobby_side_size');
+        localStorage.removeItem('pointerx_lobby_side_turn');
+        for (let i = 0; i < 6; i++) localStorage.removeItem('pointerx_lobby_side_' + i);
+    } catch (e) {}
+    sideCharSize = DEFAULT_SIDE_CHAR_SIZE;
+    sideCharTurn = DEFAULT_SIDE_CHAR_TURN;
 }
 function lobbyLayoutJSON() {
     const out = {};
@@ -3057,8 +3192,17 @@ function makeLobbyPanelResizable(el, key, handle) {
         if (!resizing) return;
         const dx = cx - startX, dy = cy - startY;
         if (isTitle) {
-            const fs = Math.max(20, Math.min(90, startFS + (dx + dy) * 0.15));
-            el.style.fontSize = fs + 'px';
+            // 🖼️ Logo title: resize = image ki width (aspect ratio same rehti hai).
+            const logoImg = el.querySelector('#lobby-logo-img');
+            if (logoImg) {
+                const w = Math.max(120, Math.min(800, startW + dx));
+                logoImg.style.width = w + 'px';
+                el.style.width = w + 'px';
+            } else {
+                // Fallback: purana text title (font size).
+                const fs = Math.max(20, Math.min(90, startFS + (dx + dy) * 0.15));
+                el.style.fontSize = fs + 'px';
+            }
         } else {
             // ⚠️ FIX: min height 120px thi — menu button sirf ~40px ka hota
             // hai, is liye resize shuru karte hi wo ek dum 120px ho jata
@@ -3074,7 +3218,13 @@ function makeLobbyPanelResizable(el, key, handle) {
         if (!resizing) return;
         resizing = false;
         if (isTitle) {
-            saveLobbyPanelPos('title', el.offsetLeft, el.offsetTop, 0, 0, parseFloat(el.style.fontSize) || 42);
+            // 🖼️ Logo title: width save karo (fontSize nahi).
+            const logoImg = el.querySelector('#lobby-logo-img');
+            if (logoImg) {
+                saveLobbyPanelPos('title', el.offsetLeft, el.offsetTop, 0, parseFloat(logoImg.style.width) || 360, 0);
+            } else {
+                saveLobbyPanelPos('title', el.offsetLeft, el.offsetTop, 0, 0, parseFloat(el.style.fontSize) || 42);
+            }
         } else {
             saveLobbyPanelPos(key, el.offsetLeft, el.offsetTop, el.offsetHeight, el.offsetWidth, 0);
         }
@@ -3215,6 +3365,13 @@ function buildLobbyHTML(opts) {
     const playBtn = opts.mode === 'guest'
         ? `<button id="join-btn" class="lobby-item" data-lobby-item="play" style="position:absolute;${playStyle}padding:14px;font-size:24px;font-weight:900;background:#ffc400;color:#111;border:none;border-radius:8px;cursor:move;box-shadow:0 4px 0 #b88600;z-index:3;user-select:none;">PLAY<span class="lobby-resize-handle" data-panel="play" style="position:absolute;right:4px;bottom:2px;font-size:11px;color:rgba(0,0,0,0.5);cursor:nwse-resize;">↘</span></button>`
         : `<button id="start-google-game" class="lobby-item" data-lobby-item="play" style="position:absolute;${playStyle}padding:14px;font-size:24px;font-weight:900;background:#ffc400;color:#111;border:none;border-radius:8px;cursor:move;box-shadow:0 4px 0 #b88600;z-index:3;user-select:none;">PLAY<span class="lobby-resize-handle" data-panel="play" style="position:absolute;right:4px;bottom:2px;font-size:11px;color:rgba(0,0,0,0.5);cursor:nwse-resize;">↘</span></button>`;
+    // ✅ READY button — PLAY ke bagal me (lobby item, drag + resize).
+    // Dabao to ready, dobara dabao to STOP (un-ready) — toggle chalta rahega.
+    const readyPos = getLobbyPanelPos('item_ready');
+    const readyStyle = readyPos
+        ? `left:${readyPos.left}px;top:${readyPos.top}px;width:${readyPos.width || 200}px;height:${readyPos.height || 56}px;`
+        : 'left:300px;top:604px;width:200px;height:70px;';
+    const readyBtn = `<button id="lobby-ready-btn" class="lobby-item" data-lobby-item="ready" style="position:absolute;${readyStyle}padding:14px;font-size:24px;font-weight:900;background:#2a6cff;color:#fff;border:none;border-radius:8px;cursor:move;box-shadow:0 4px 0 #1a4dbb;z-index:3;user-select:none;">✅ READY<span class="lobby-resize-handle" data-panel="ready" style="position:absolute;right:4px;bottom:2px;font-size:11px;color:rgba(255,255,255,0.6);cursor:nwse-resize;">↘</span></button>`;
     
     const lvlInfo = levelFromXP(totalXP);
     const lvlPct = Math.min(100, Math.round((lvlInfo.xpIntoLevel / lvlInfo.xpNeeded) * 100));
@@ -3249,7 +3406,9 @@ function buildLobbyHTML(opts) {
     // (drag + resize, click-vs-drag threshold se button bhi kaam karta hai).
     const menu = ['HUB','STORE','SERVERS','QUESTS','FRIENDS','INVENTORY','EDITOR','SKINS'].map((m) => {
         const active = m === 'HUB' ? 'background:#2a6cff;color:white;' : 'background:transparent;color:#cdd6ff;';
-        return `<button class="lobby-menu-btn lobby-item" data-lobby-item="menu_${m}" data-menu="${m}" style="position:absolute;left:16px;top:16px;width:170px;padding:10px;text-align:left;font-weight:bold;border:none;border-radius:6px;cursor:move;${active}">${m}<span class="lobby-resize-handle" data-panel="menu_${m}" style="position:absolute;right:4px;bottom:2px;font-size:11px;color:rgba(255,255,255,0.5);cursor:nwse-resize;">↘</span></button>`;
+        // 👥 FRIENDS — pending friend requests ka count badge (0 ho to chhupa).
+        const badge = m === 'FRIENDS' ? '<span id="friends-req-badge" style="display:none;float:right;background:#ff4444;color:#fff;font-size:11px;font-weight:900;border-radius:10px;padding:1px 7px;margin-left:6px;">0</span>' : '';
+        return `<button class="lobby-menu-btn lobby-item" data-lobby-item="menu_${m}" data-menu="${m}" style="position:absolute;left:16px;top:16px;width:170px;padding:10px;text-align:left;font-weight:bold;border:none;border-radius:6px;cursor:move;${active}">${m}${badge}<span class="lobby-resize-handle" data-panel="menu_${m}" style="position:absolute;right:4px;bottom:2px;font-size:11px;color:rgba(255,255,255,0.5);cursor:nwse-resize;">↘</span></button>`;
     }).join('');
 
     const logoutItem = opts.mode === 'google'
@@ -3311,7 +3470,7 @@ function buildLobbyHTML(opts) {
     });
 
     return `
-    <div id="lobby-title" style="position:absolute;${titlePos ? `left:${titlePos.left}px;top:${titlePos.top}px;` : 'top:18px;left:50%;transform:translateX(-50%);'}font-size:${titlePos && titlePos.fontSize ? titlePos.fontSize : 42}px;font-weight:900;letter-spacing:2px;color:white;text-shadow:3px 3px #000;z-index:2;cursor:move;user-select:none;" title="Drag karo — title ki position badlo">POINTER <span style="color:#00ffcc;">X</span><span class="lobby-resize-handle" data-panel="title" style="font-size:16px;color:#888;cursor:nwse-resize;margin-left:8px;vertical-align:middle;" title="Is se pakad ke title ki size badlo">↘</span></div>
+    <div id="lobby-title" style="position:absolute;${titlePos ? `left:${titlePos.left}px;top:${titlePos.top}px;` : 'top:18px;left:50%;transform:translateX(-50%);'}z-index:2;cursor:move;user-select:none;line-height:0;" title="Drag karo — logo ki position badlo"><img id="lobby-logo-img" src="logo.png" alt="POINTER X" draggable="false" style="width:${titlePos && titlePos.width ? titlePos.width : 360}px;height:auto;display:block;"><span class="lobby-resize-handle" data-panel="title" style="position:absolute;right:2px;bottom:2px;font-size:16px;color:#fff;text-shadow:1px 1px #000;cursor:nwse-resize;line-height:1;" title="Is se pakad ke logo ki size badlo">↘</span></div>
     
     <!-- Left panel HATA diya — uski har cheez ab alag item hai (drag + resize). -->
     <div class="lobby-item" data-lobby-item="playercard" id="lobby-player-card" style="position:absolute;left:16px;top:16px;width:170px;background:rgba(255,255,255,0.08);padding:12px;border-radius:8px;cursor:move;user-select:none;z-index:3;">
@@ -3358,12 +3517,13 @@ function buildLobbyHTML(opts) {
         <div style="padding:8px 10px 0;flex-shrink:0;">
             <input id="wwp-search" type="text" placeholder="🔍 Search name ya #ID..." style="width:100%;box-sizing:border-box;padding:8px;font-size:13px;background:#111;color:white;border:1px solid #444;border-radius:6px;outline:none;">
         </div>
-        <div id="wwp-list" style="flex:1;overflow-y:auto;padding:0 10px 10px;"></div>
+        <div id="wwp-list" style="flex:1;min-height:0;overflow-y:scroll;padding:0 10px 10px;scrollbar-width:thin;scrollbar-color:#00d2ff rgba(255,255,255,0.08);"></div>
         <span class="lobby-resize-handle" data-panel="wwp" style="position:absolute;right:4px;bottom:2px;font-size:11px;color:rgba(255,255,255,0.6);cursor:nwse-resize;">↘</span>
     </div>
 
     <!-- ▶️ PLAY button — panel se bahar, alag lobby item (drag + resize). -->
     ${playBtn}
+    ${readyBtn}
 
     <!-- 🌟 Draggable & Minimizable Anyways Panel -->
     <div id="lobby-card" style="position:absolute; ${cardPos ? `left:${cardPos.left}px;top:${cardPos.top}px;${cardPos.height ? `height:${cardPos.height}px;` : ''}` : 'left: calc(50% - 170px); bottom: 20px;'} background:rgba(0,0,0,0.92); border: 2px solid #222; border-radius:12px; width:${cardPos && cardPos.width ? cardPos.width : 340}px; max-width:92vw; z-index:10; box-shadow: 0 10px 25px rgba(0,0,0,0.7);">
@@ -3435,6 +3595,19 @@ function buildLobbyHTML(opts) {
               </div>
             </div>
 
+            <hr style="border:0; border-top:1px solid #333; margin:12px 0;">
+            <div style="font-size:12px; font-weight:bold; color:#00d2ff; text-align:left; margin-bottom:4px;">SIDE CHARACTER (JOINED FRIEND)</div>
+            <div style="font-size:11px;color:#aaa;text-align:left;margin-bottom:6px;">Dost ki lobby character — side pe khada hota hai. Sirf admin badal sakta hai. Character ko pakad kar khinch bhi sakte ho (drag), ya neeche sliders se.</div>
+            <div style="margin-top:8px; text-align: left;">
+              <div style="font-size:11px;color:#00ffcc; margin-bottom: 2px;">SIDE SIZE: <span id="lobby-side-size-value">${sideCharSize.toFixed(2)}</span></div>
+              <input type="range" id="lobby-side-size-slider" min="0.3" max="1" step="0.05" value="${sideCharSize}" style="width:100%;accent-color:#00ffcc;cursor:pointer;">
+            </div>
+            <div style="margin-top:8px; text-align: left;">
+              <div style="font-size:11px;color:#00ffcc; margin-bottom: 2px;">SIDE TURN: <span id="lobby-side-turn-value">${sideCharTurn.toFixed(2)}</span> &nbsp;<span style="color:#aaa;">(beech ki taraf murna — 0 = seedha camera ki taraf)</span></div>
+              <input type="range" id="lobby-side-turn-slider" min="-1.5" max="1.5" step="0.05" value="${sideCharTurn}" style="width:100%;accent-color:#00ffcc;cursor:pointer;">
+            </div>
+            <button id="lobby-side-copy-layout" style="width:100%;padding:8px;margin-top:8px;font-weight:bold;background:#00d2ff;color:#04263b;border:none;border-radius:6px;cursor:pointer;font-size:12px;">📋 COPY SIDE LAYOUT</button>
+            <button id="lobby-side-reset" style="width:100%;padding:8px;margin-top:6px;font-weight:bold;background:#334155;color:white;border:none;border-radius:6px;cursor:pointer;font-size:12px;">RESET SIDE CHARACTER</button>
 
             <hr style="border:0; border-top:1px solid #333; margin:12px 0;">
             <div style="font-size:12px; font-weight:bold; color:#ffc400; text-align:left; margin-bottom:4px;">ADVANCED PARTS EDITOR (SCALE / ROT / POS & ELBOWS)</div>
@@ -3483,6 +3656,12 @@ function setupLobbyMenus() {
             if (rz) makeLobbyPanelResizable(el, 'item_' + k, rz);
         });
     } catch (e) {}
+
+    // ✅ READY button — dabao to ready, dobara dabao to STOP (toggle).
+    // (Drag ka click-suppressor pehle register ho chuka hai — drag ke baad toggle nahi chalega.)
+    const readyBtn = document.getElementById('lobby-ready-btn');
+    if (readyBtn) readyBtn.addEventListener('click', () => { toggleReady(); });
+    try { updateReadyButton(); updatePlayButtonsDisabled(); } catch (e) {}
 
     // 🖼️ PFP upload — box par click (drag nahi) to file picker khule.
     // Ye har player ke liye hai (FPS-only nahi). Click suppressor pehle
@@ -3542,9 +3721,11 @@ function setupLobbyMenus() {
             if (m === 'SKINS') { openSkinEditor(); return; }
             if (m === 'INVENTORY') { openInventory(); return; }
             if (m === 'STORE') { openStore(); return; }
+            if (m === 'FRIENDS') { openFriends(); return; }
             if (skinEditorOpen) closeSkinEditor();
             if (inventoryOpen) closeInventory();
             if (storeOpen) closeStore();
+            if (friendsOpen) closeFriends();
             lobbyToast(m + ' — Coming soon');
         });
     });
@@ -3686,6 +3867,28 @@ function setupLobbyMenus() {
     if (rotRight) rotRight.addEventListener('click', () => { setLobbyPlayerRotate(lobbyPlayerRotate + 15); });
     const flipBtn = document.getElementById('lobby-flip');
     if (flipBtn) flipBtn.addEventListener('click', () => { setLobbyPlayerRotate(lobbyPlayerRotate === 180 ? 0 : 180); });
+    // 👥 SIDE CHARACTER (joined friend) — size/turn sliders + copy/reset (admin only, mod-sections me hai).
+    const sideSizeSlider = document.getElementById('lobby-side-size-slider');
+    if (sideSizeSlider) {
+        sideSizeSlider.value = String(sideCharSize);
+        sideSizeSlider.addEventListener('input', () => { setSideCharSize(sideSizeSlider.value); });
+    }
+    const sideTurnSlider = document.getElementById('lobby-side-turn-slider');
+    if (sideTurnSlider) {
+        sideTurnSlider.value = String(sideCharTurn);
+        sideTurnSlider.addEventListener('input', () => { setSideCharTurn(sideTurnSlider.value); });
+    }
+    const sideCopyBtn = document.getElementById('lobby-side-copy-layout');
+    if (sideCopyBtn) sideCopyBtn.addEventListener('click', () => { copySideCharLayout(); });
+    const sideResetBtn = document.getElementById('lobby-side-reset');
+    if (sideResetBtn) sideResetBtn.addEventListener('click', () => { resetSideChar(); });
+    // 🖱️ Side character drag — ek dafa attach karo (window par, overlay target check andar hai).
+    if (!sideCharDragWired) {
+        sideCharDragWired = true;
+        window.addEventListener('mousedown', sideCharOverlayMouseDown);
+        window.addEventListener('mousemove', sideCharOverlayMouseMove);
+        window.addEventListener('mouseup', sideCharOverlayMouseUp);
+    }
     const gunXSlider = document.getElementById('lobby-gun-x-slider');
     if (gunXSlider) {
         gunXSlider.value = String(lobbyGunX);
@@ -4161,6 +4364,7 @@ function openSkinEditor() {
     if (!overlay || document.getElementById('skin-editor-panel')) return;
     if (inventoryOpen) closeInventory();
     if (storeOpen) closeStore();
+    if (friendsOpen) closeFriends();
     if (!lobbySteveParts) { try { createLobbyCharacter(); } catch (e) {} }
     if (!lobbySteveParts) return;
     try {
@@ -4175,12 +4379,18 @@ function openSkinEditor() {
 
     const panel = document.createElement('div');
     panel.id = 'skin-editor-panel';
-    panel.style.cssText = 'position:absolute;right:0;top:0;bottom:0;width:300px;background:rgba(8,16,60,0.98);padding:14px;overflow-y:auto;z-index:20;color:white;font-family:monospace;';
+    // 📍 Position/size — saved layout (pointerx_lobby_pos_skins) ya baked default.
+    // Admin drag/resize kar sakta hai (mod-gated); COPY LAYOUT se code bhej do.
+    const kp = (typeof getLobbyPanelPos === 'function' && getLobbyPanelPos('skins')) || { left: 295, top: 6, width: 1021, height: 704 };
+    const kpW = Math.max(200, kp.width || 320);
+    const kpH = Math.max(200, kp.height || 600);
+    panel.style.cssText = 'position:absolute;left:' + kp.left + 'px;top:' + kp.top + 'px;width:' + kpW + 'px;height:' + kpH + 'px;background:rgba(8,16,60,0.98);padding:14px;overflow-y:auto;z-index:20;color:white;font-family:monospace;box-sizing:border-box;';
     panel.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div style="font-size:16px;font-weight:900;color:#00ffcc;">SKIN EDITOR</div>
+            <div id="skin-drag-handle" style="font-size:16px;font-weight:900;color:#00ffcc;cursor:move;user-select:none;">SKIN EDITOR</div>
             <button id="skin-close-btn" style="background:#222;color:#fff;border:1px solid #444;width:28px;height:28px;border-radius:4px;font-weight:bold;cursor:pointer;">✕</button>
         </div>
+        <button id="skin-copy-layout-btn" style="width:100%;margin-top:10px;padding:7px;font-size:12px;font-weight:900;background:#2a6cff;color:white;border:none;border-radius:6px;cursor:pointer;">📋 COPY LAYOUT</button>
         <div style="font-size:11px;color:#aaa;margin-top:6px;line-height:1.5;">Player T-pose me khada hai aur us par chhote chhote pixel boxes bane hain. Seedha character par click karke paint karo — jis pixel par click karo ge, rang sirf usi pixel me ayega. Drag karke player ko ghumao (peeche aur side se paint karne ke liye). Front, back aur side alag hain, front ka rang peeche nahi jayega.</div>
         <div style="font-size:11px;color:#aaa;margin-top:6px;">Last painted: <span id="skin-part-name" style="color:#00ffcc;"></span></div>
         <div style="font-size:12px;font-weight:bold;color:#00ffcc;margin-top:10px;">COLOR</div>
@@ -4211,8 +4421,12 @@ function openSkinEditor() {
             <div style="font-size:11px;color:#aaa;margin-top:4px;">Minecraft skin wali 64x64 texture (PNG) upload karo — skin khud hi load ho jayegi.</div>
             <input type="file" id="skin-upload-input" accept="image/*" style="display:none;">
             <button id="skin-upload-btn" style="width:100%;padding:8px;margin-top:6px;font-weight:bold;background:#2a6cff;color:white;border:none;border-radius:6px;cursor:pointer;font-size:12px;">UPLOAD TEXTURE</button>
-        </div>`;
+        </div>
+        <span id="skin-resize-handle" style="position:absolute;right:2px;bottom:2px;font-size:13px;color:rgba(255,255,255,0.6);cursor:nwse-resize;user-select:none;">↘</span>`;
     overlay.appendChild(panel);
+    // 🖱️📏 Drag + resize — sirf admin (mod) ke liye (andar isLobbyLayoutMod check hai).
+    try { makeLobbyPanelDraggable(panel, 'skins', document.getElementById('skin-drag-handle')); } catch (e) {}
+    try { makeLobbyPanelResizable(panel, 'skins', document.getElementById('skin-resize-handle')); } catch (e) {}
 
     const right = document.getElementById('lobby-right-panel');
     if (right) right.style.display = 'none';
@@ -4225,6 +4439,7 @@ function openSkinEditor() {
     updateSkinColorPreview();
 
     document.getElementById('skin-close-btn').addEventListener('click', closeSkinEditor);
+    document.getElementById('skin-copy-layout-btn').addEventListener('click', () => copyPanelLayout('skins'));
     panel.querySelectorAll('.skin-color-btn').forEach((b) => {
         b.addEventListener('click', () => { skinEditorColor = b.dataset.color; skinEraser = false; updateSkinColorPreview(); });
     });
@@ -4353,19 +4568,30 @@ function openInventory() {
     if (!overlay || document.getElementById('inventory-panel')) return;
     if (skinEditorOpen) closeSkinEditor();
     if (storeOpen) closeStore();
+    if (friendsOpen) closeFriends();
     if (!lobbySteveParts) { try { createLobbyCharacter(); } catch (e) {} }
     const panel = document.createElement('div');
     panel.id = 'inventory-panel';
-    panel.style.cssText = 'position:absolute;right:0;top:0;bottom:0;width:300px;background:rgba(8,16,60,0.98);padding:14px;overflow-y:auto;z-index:20;color:white;font-family:monospace;';
+    // 📍 Position/size — saved layout (pointerx_lobby_pos_inventory) ya baked default.
+    // Admin drag/resize kar sakta hai (mod-gated); COPY LAYOUT se code bhej do.
+    const ip = (typeof getLobbyPanelPos === 'function' && getLobbyPanelPos('inventory')) || { left: 295, top: 6, width: 1021, height: 704 };
+    const ipW = Math.max(200, ip.width || 320);
+    const ipH = Math.max(200, ip.height || 600);
+    panel.style.cssText = 'position:absolute;left:' + ip.left + 'px;top:' + ip.top + 'px;width:' + ipW + 'px;height:' + ipH + 'px;background:rgba(8,16,60,0.98);padding:14px;overflow-y:auto;z-index:20;color:white;font-family:monospace;box-sizing:border-box;';
     panel.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div style="font-size:16px;font-weight:900;color:#00ffcc;">INVENTORY</div>
+            <div id="inventory-drag-handle" style="font-size:16px;font-weight:900;color:#00ffcc;cursor:move;user-select:none;">INVENTORY</div>
             <button id="inventory-close-btn" style="background:#222;color:#fff;border:1px solid #444;width:28px;height:28px;border-radius:4px;font-weight:bold;cursor:pointer;">✕</button>
         </div>
+        <button id="inventory-copy-layout-btn" style="width:100%;margin-top:10px;padding:7px;font-size:12px;font-weight:900;background:#2a6cff;color:white;border:none;border-radius:6px;cursor:pointer;">📋 COPY LAYOUT</button>
         <div style="font-size:11px;color:#aaa;margin-top:6px;line-height:1.5;">Skin par click karke equip karo. Equip sirf tumhare account par lagta hai — doosre Google account par nahi.</div>
         <div id="inventory-list" style="display:flex;flex-direction:column;gap:10px;margin-top:12px;"></div>
+        <span id="inventory-resize-handle" style="position:absolute;right:2px;bottom:2px;font-size:13px;color:rgba(255,255,255,0.6);cursor:nwse-resize;user-select:none;">↘</span>
     `;
     overlay.appendChild(panel);
+    // 🖱️📏 Drag + resize — sirf admin (mod) ke liye (andar isLobbyLayoutMod check hai).
+    try { makeLobbyPanelDraggable(panel, 'inventory', document.getElementById('inventory-drag-handle')); } catch (e) {}
+    try { makeLobbyPanelResizable(panel, 'inventory', document.getElementById('inventory-resize-handle')); } catch (e) {}
     const right = document.getElementById('lobby-right-panel');
     if (right) right.style.display = 'none';
     const card = document.getElementById('lobby-card');
@@ -4373,6 +4599,7 @@ function openInventory() {
     inventoryOpen = true;
     renderInventoryPanel();
     document.getElementById('inventory-close-btn').addEventListener('click', closeInventory);
+    document.getElementById('inventory-copy-layout-btn').addEventListener('click', () => copyPanelLayout('inventory'));
 }
 function renderInventoryPanel() {
     const list = document.getElementById('inventory-list');
@@ -4459,18 +4686,29 @@ function openStore() {
     if (!overlay || document.getElementById('store-panel')) return;
     if (skinEditorOpen) closeSkinEditor();
     if (inventoryOpen) closeInventory();
+    if (friendsOpen) closeFriends();
     const panel = document.createElement('div');
     panel.id = 'store-panel';
-    panel.style.cssText = 'position:absolute;right:0;top:0;bottom:0;width:300px;background:rgba(8,16,60,0.98);padding:14px;overflow-y:auto;z-index:20;color:white;font-family:monospace;';
+    // 📍 Position/size — saved layout (pointerx_lobby_pos_store) ya baked default.
+    // Admin drag/resize kar sakta hai (mod-gated); COPY LAYOUT se code bhej do.
+    const sp = (typeof getLobbyPanelPos === 'function' && getLobbyPanelPos('store')) || { left: 295, top: 6, width: 1021, height: 704 };
+    const spW = Math.max(200, sp.width || 320);
+    const spH = Math.max(200, sp.height || 600);
+    panel.style.cssText = 'position:absolute;left:' + sp.left + 'px;top:' + sp.top + 'px;width:' + spW + 'px;height:' + spH + 'px;background:rgba(8,16,60,0.98);padding:14px;overflow-y:auto;z-index:20;color:white;font-family:monospace;box-sizing:border-box;';
     panel.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div style="font-size:16px;font-weight:900;color:#ffd700;">🛒 STORE</div>
+            <div id="store-drag-handle" style="font-size:16px;font-weight:900;color:#ffd700;cursor:move;user-select:none;">🛒 STORE</div>
             <button id="store-close-btn" style="background:#222;color:#fff;border:1px solid #444;width:28px;height:28px;border-radius:4px;font-weight:bold;cursor:pointer;">✕</button>
         </div>
+        <button id="store-copy-layout-btn" style="width:100%;margin-top:10px;padding:7px;font-size:12px;font-weight:900;background:#2a6cff;color:white;border:none;border-radius:6px;cursor:pointer;">📋 COPY LAYOUT</button>
         <div id="store-balance" style="font-size:12px;color:#aaa;margin-top:6px;line-height:1.6;"></div>
         <div id="store-list" style="display:flex;flex-direction:column;gap:10px;margin-top:12px;"></div>
+        <span id="store-resize-handle" style="position:absolute;right:2px;bottom:2px;font-size:13px;color:rgba(255,255,255,0.6);cursor:nwse-resize;user-select:none;">↘</span>
     `;
     overlay.appendChild(panel);
+    // 🖱️📏 Drag + resize — sirf admin (mod) ke liye (andar isLobbyLayoutMod check hai).
+    try { makeLobbyPanelDraggable(panel, 'store', document.getElementById('store-drag-handle')); } catch (e) {}
+    try { makeLobbyPanelResizable(panel, 'store', document.getElementById('store-resize-handle')); } catch (e) {}
     const right = document.getElementById('lobby-right-panel');
     if (right) right.style.display = 'none';
     const card = document.getElementById('lobby-card');
@@ -4478,6 +4716,7 @@ function openStore() {
     storeOpen = true;
     renderStorePanel();
     document.getElementById('store-close-btn').addEventListener('click', closeStore);
+    document.getElementById('store-copy-layout-btn').addEventListener('click', () => copyPanelLayout('store'));
 }
 function renderStorePanel() {
     const list = document.getElementById('store-list');
@@ -4517,6 +4756,547 @@ function closeStore() {
     if (right) right.style.display = '';
     restoreLobbyCard();
     storeOpen = false;
+}
+
+// 👥 FRIENDS — doston ki list + friend requests. FRIENDS menu button se
+// khulta hai (sab players ke liye, admin-only nahi). Do tabs: Friends
+// aur F.Req (incoming requests). Search bar me kisi player ki 6-digit #ID
+// daalo + Enter dabao → us player ko friend request jati hai; wo apne
+// F.Req me tumhari profile dekh kar Accept ya Decline kar sakta hai.
+function openFriends() {
+    const overlay = document.getElementById('name-overlay');
+    if (!overlay || document.getElementById('friends-panel')) return;
+    if (skinEditorOpen) closeSkinEditor();
+    if (inventoryOpen) closeInventory();
+    if (storeOpen) closeStore();
+    const panel = document.createElement('div');
+    panel.id = 'friends-panel';
+    // 📍 Position/size — saved layout (pointerx_lobby_pos_friends) ya baked default.
+    // Admin drag/resize kar sakta hai (mod-gated); COPY LAYOUT se code bhej do.
+    const fp = (typeof getLobbyPanelPos === 'function' && getLobbyPanelPos('friends')) || { left: 295, top: 6, width: 1021, height: 704 };
+    const fpW = Math.max(200, fp.width || 320);
+    const fpH = Math.max(200, fp.height || 600);
+    panel.style.cssText = 'position:absolute;left:' + fp.left + 'px;top:' + fp.top + 'px;width:' + fpW + 'px;height:' + fpH + 'px;background:rgba(8,16,60,0.98);padding:14px;overflow-y:auto;z-index:20;color:white;font-family:monospace;box-sizing:border-box;';
+    panel.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div id="friends-drag-handle" style="font-size:16px;font-weight:900;color:#00d2ff;cursor:move;user-select:none;">👥 FRIENDS <span id="friends-count-badge" style="background:#00d2ff;color:#04263b;border-radius:10px;padding:1px 8px;font-size:12px;font-weight:900;vertical-align:middle;">0</span></div>
+            <button id="friends-close-btn" style="background:#222;color:#fff;border:1px solid #444;width:28px;height:28px;border-radius:4px;font-weight:bold;cursor:pointer;">✕</button>
+        </div>
+        <button id="friends-copy-layout-btn" style="width:100%;margin-top:10px;padding:7px;font-size:12px;font-weight:900;background:#2a6cff;color:white;border:none;border-radius:6px;cursor:pointer;">📋 COPY LAYOUT</button>
+        <div style="margin-top:10px;display:flex;gap:6px;">
+            <input id="friends-search" type="text" maxlength="7" placeholder="ID daalo — # lagana zaroori nahi..." style="flex:1;box-sizing:border-box;padding:8px;font-size:13px;background:#111;color:white;border:1px solid #444;border-radius:6px;outline:none;min-width:0;">
+            <button id="friends-send-btn" style="padding:8px 12px;font-size:12px;font-weight:900;background:#00d2ff;color:#062a33;border:none;border-radius:6px;cursor:pointer;flex-shrink:0;">SEND</button>
+        </div>
+        <div style="font-size:11px;color:#888;margin-top:4px;">6 digits ki ID daal kar Enter dabao (# lagaye ya na lagaye) → us player ko request jayegi.</div>
+        <div style="display:flex;gap:6px;margin-top:12px;">
+            <button id="friends-tab-friends" style="flex:1;padding:8px;font-size:13px;font-weight:900;border:none;border-radius:6px;cursor:pointer;">👥 Friends</button>
+            <button id="friends-tab-requests" style="flex:1;padding:8px;font-size:13px;font-weight:900;border:none;border-radius:6px;cursor:pointer;">📩 F.Req <span id="friends-req-count" style="background:#ff4444;color:#fff;border-radius:10px;padding:1px 7px;font-size:11px;">0</span></button>
+        </div>
+        <div id="friends-list" style="display:flex;flex-direction:column;gap:8px;margin-top:12px;"></div>
+        <div id="friends-req-list" style="display:none;flex-direction:column;gap:8px;margin-top:12px;"></div>
+        <span id="friends-resize-handle" style="position:absolute;right:2px;bottom:2px;font-size:13px;color:rgba(255,255,255,0.6);cursor:nwse-resize;user-select:none;">↘</span>
+    `;
+    overlay.appendChild(panel);
+    // 🖱️📏 Drag + resize — sirf admin (mod) ke liye (andar isLobbyLayoutMod check hai).
+    try { makeLobbyPanelDraggable(panel, 'friends', document.getElementById('friends-drag-handle')); } catch (e) {}
+    try { makeLobbyPanelResizable(panel, 'friends', document.getElementById('friends-resize-handle')); } catch (e) {}
+    const right = document.getElementById('lobby-right-panel');
+    if (right) right.style.display = 'none';
+    const card = document.getElementById('lobby-card');
+    if (card) card.style.display = 'none';
+    friendsOpen = true;
+    renderFriendsPanel();
+    document.getElementById('friends-close-btn').addEventListener('click', closeFriends);
+    document.getElementById('friends-copy-layout-btn').addEventListener('click', copyFriendsLayout);
+    document.getElementById('friends-send-btn').addEventListener('click', sendFriendRequest);
+    const search = document.getElementById('friends-search');
+    if (search) search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); sendFriendRequest(); } });
+    document.getElementById('friends-tab-friends').addEventListener('click', () => { friendsTab = 'friends'; renderFriendsPanel(); });
+    document.getElementById('friends-tab-requests').addEventListener('click', () => { friendsTab = 'requests'; renderFriendsPanel(); });
+}
+// 📋 PANEL COPY LAYOUT — kisi bhi side panel (Friends/Inventory/Store/Skins)
+// ki current position/size copy karo; Jimmy mujhe bhej de to main use
+// DEFAULT_LOBBY_LAYOUT me default kar dunga.
+function copyPanelLayout(key) {
+    try {
+        const p = (typeof getLobbyPanelPos === 'function' && getLobbyPanelPos(key)) || { left: 295, top: 6, width: 1021, height: 704 };
+        const obj = {};
+        obj[key] = { left: Math.round(p.left), top: Math.round(p.top), height: Math.round(p.height || 600), width: Math.round(p.width || 320) };
+        const json = JSON.stringify(obj);
+        const label = key === 'friends' ? 'Friends' : key === 'inventory' ? 'Inventory' : key === 'store' ? 'Store' : key === 'skins' ? 'Skin Editor' : key;
+        const done = () => { try { if (typeof lobbyToast === 'function') lobbyToast('✅ ' + label + ' layout copy ho gaya! Mujhe bhej do, main default kar dunga.'); } catch (e) {} };
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(json).then(done, () => { try { if (typeof lobbyToast === 'function') lobbyToast(label + ' layout: ' + json); } catch (e) {} });
+            else if (typeof lobbyToast === 'function') lobbyToast(label + ' layout: ' + json);
+        } catch (e) { try { if (typeof lobbyToast === 'function') lobbyToast(label + ' layout: ' + json); } catch (e2) {} }
+    } catch (e) {}
+}
+// 📋 FRIENDS COPY LAYOUT — panel ki current position/size copy karo,
+// Jimmy mujhe bhej de to main use DEFAULT_LOBBY_LAYOUT.friends me default kar dunga.
+function copyFriendsLayout() { copyPanelLayout('friends'); }
+function renderFriendsPanel() {
+    const list = document.getElementById('friends-list');
+    const reqList = document.getElementById('friends-req-list');
+    const countEl = document.getElementById('friends-req-count');
+    const tabF = document.getElementById('friends-tab-friends');
+    const tabR = document.getElementById('friends-tab-requests');
+    if (!list || !reqList) return;
+    // F.Req count badge (tab + menu button dono).
+    const n = (friendRequests || []).length;
+    if (countEl) countEl.textContent = String(n);
+    updateFriendsBadge();
+    // Tabs — active wala cyan, doosra grey.
+    if (tabF) { tabF.style.background = friendsTab === 'friends' ? '#00d2ff' : '#222'; tabF.style.color = friendsTab === 'friends' ? '#062a33' : '#ccc'; }
+    if (tabR) { tabR.style.background = friendsTab === 'requests' ? '#00d2ff' : '#222'; tabR.style.color = friendsTab === 'requests' ? '#062a33' : '#ccc'; }
+    list.style.display = friendsTab === 'friends' ? 'flex' : 'none';
+    reqList.style.display = friendsTab === 'requests' ? 'flex' : 'none';
+    // 👥 Friends list — PFP + naam + gold #ID + online dot.
+    if (!friendsList.length) {
+        list.innerHTML = '<div style="color:#888;font-size:12px;text-align:center;padding:14px 6px;">Abhi koi friend nahi hai.<br>Upar #ID daal kar request bhejo!</div>';
+    } else {
+        const rows = (friendsList || []).slice().sort((a, b) => ((b.online ? 1 : 0) - (a.online ? 1 : 0)) || String(a.name || '').localeCompare(String(b.name || '')));
+        list.innerHTML = rows.map((p) => {
+            const nm = String(p.name || 'Player');
+            const pid = String(p.playerId || '??????');
+            const pfp = String(p.pfp || '');
+            const dot = p.online ? '<span style="color:#00ff88;" title="Online">●</span> ' : '<span style="color:#666;" title="Offline">○</span> ';
+            // ✅ Meri lobby me khada hai aur ready hai to ✅, warna ❌.
+            const inMyLobby = (lobbyMembers || []).some((mm) => mm && mm.key === p.key);
+            const readyMark = inMyLobby ? (p.ready ? ' ✅' : ' ❌') : '';
+            const statusText = (!p.online ? 'Offline' : (p.inGame ? '🎮 Game me' : '🟢 Lobby me')) + readyMark;
+            const statusColor = !p.online ? '#888' : (p.inGame ? '#00ff88' : '#00d2ff');
+            // 👥 Uski lobby me pehle se ho to Join ki jagah Leave dikhao.
+            const inTheirLobby = !!(typeof lobbyHostKey === 'string' && lobbyHostKey && lobbyHostKey === String(p.key || ''));
+            const joinLabel = inTheirLobby ? '🚪 Leave' : '🎮 Join';
+            const joinBg = inTheirLobby ? '#ff8800' : '#00c853';
+            const img = pfp
+                ? '<img src="' + escapeHtml(pfp) + '" style="width:36px;height:36px;border-radius:50%;object-fit:cover;flex-shrink:0;' + (p.online ? '' : 'filter:grayscale(1);opacity:0.7;') + '" alt="">'
+                : '<div style="width:36px;height:36px;border-radius:50%;background:#334155;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:16px;flex-shrink:0;' + (p.online ? '' : 'opacity:0.6;') + '">' + escapeHtml(nm.charAt(0).toUpperCase()) + '</div>';
+            return '<div style="display:flex;gap:8px;align-items:center;background:rgba(255,255,255,0.05);border-radius:8px;padding:7px 8px;">'
+                + img
+                + '<div style="min-width:0;flex:1;">'
+                + '<div style="color:#fff;font-size:13px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + dot + escapeHtml(nm) + ' <span style="color:#ffd700;">#' + escapeHtml(pid) + '</span></div>'
+                + '<div style="color:' + statusColor + ';font-size:11px;">' + statusText + '</div>'
+                + '</div>'
+                + '<button class="friend-join-btn" data-key="' + escapeHtml(String(p.key || '')) + '" data-name="' + escapeHtml(nm) + '" style="padding:6px 10px;font-size:11px;font-weight:900;background:' + joinBg + ';color:#fff;border:none;border-radius:6px;cursor:pointer;flex-shrink:0;' + (p.online ? '' : 'opacity:0.45;') + '">' + joinLabel + '</button>'
+                + '<button class="friend-remove-btn" data-key="' + escapeHtml(String(p.key || '')) + '" data-name="' + escapeHtml(nm) + '" data-pid="' + escapeHtml(pid) + '" style="padding:6px 10px;font-size:11px;font-weight:900;background:#ff4444;color:#fff;border:none;border-radius:6px;cursor:pointer;flex-shrink:0;">❌ Remove</button>'
+                + '</div>';
+        }).join('');
+        list.querySelectorAll('.friend-join-btn').forEach((b) => {
+            b.addEventListener('click', () => joinFriend(b.dataset.key, b.dataset.name));
+        });
+        list.querySelectorAll('.friend-remove-btn').forEach((b) => {
+            b.addEventListener('click', () => openRemoveFriendConfirm({ key: b.dataset.key, name: b.dataset.name, playerId: b.dataset.pid }));
+        });
+    }
+    // 📩 F.Req — aayi hui requests: sender ki profile + Accept / Decline.
+    if (!friendRequests.length) {
+        reqList.innerHTML = '<div style="color:#888;font-size:12px;text-align:center;padding:14px 6px;">Koi friend request nahi aayi.</div>';
+    } else {
+        reqList.innerHTML = friendRequests.map((p) => {
+            const nm = String(p.name || 'Player');
+            const pid = String(p.playerId || '??????');
+            const pfp = String(p.pfp || '');
+            const key = String(p.key || '');
+            const img = pfp
+                ? '<img src="' + escapeHtml(pfp) + '" style="width:36px;height:36px;border-radius:50%;object-fit:cover;flex-shrink:0;" alt="">'
+                : '<div style="width:36px;height:36px;border-radius:50%;background:#334155;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:16px;flex-shrink:0;">' + escapeHtml(nm.charAt(0).toUpperCase()) + '</div>';
+            return '<div style="display:flex;gap:8px;align-items:center;background:rgba(255,255,255,0.05);border-radius:8px;padding:7px 8px;">'
+                + img
+                + '<div style="min-width:0;flex:1;">'
+                + '<div style="color:#fff;font-size:13px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(nm) + ' <span style="color:#ffd700;">#' + escapeHtml(pid) + '</span></div>'
+                + '<div style="color:#aaa;font-size:11px;">Friend request bhej raha hai</div>'
+                + '</div>'
+                + '<button class="friend-accept-btn" data-key="' + escapeHtml(key) + '" style="padding:6px 10px;font-size:12px;font-weight:900;background:#00cc66;color:#fff;border:none;border-radius:6px;cursor:pointer;">✅ Accept</button>'
+                + '<button class="friend-decline-btn" data-key="' + escapeHtml(key) + '" style="padding:6px 10px;font-size:12px;font-weight:900;background:#ff4444;color:#fff;border:none;border-radius:6px;cursor:pointer;">❌ Decline</button>'
+                + '</div>';
+        }).join('');
+        reqList.querySelectorAll('.friend-accept-btn').forEach((b) => {
+            b.addEventListener('click', () => respondFriendRequest(b.dataset.key, true));
+        });
+        reqList.querySelectorAll('.friend-decline-btn').forEach((b) => {
+            b.addEventListener('click', () => respondFriendRequest(b.dataset.key, false));
+        });
+    }
+}
+function updateFriendsBadge() {
+    // FRIENDS menu button par pending requests ka count (0 ho to chhupa).
+    try {
+        const b = document.getElementById('friends-req-badge');
+        if (b) {
+            const n = (friendRequests || []).length;
+            b.style.display = n > 0 ? '' : 'none';
+            b.textContent = String(n);
+        }
+    } catch (e) {}
+    // 👥 Header me total friends ki ginti (hamesha dikhe) — renderFriendsPanel se call hota hai.
+    try {
+        const c = document.getElementById('friends-count-badge');
+        if (c) c.textContent = String((friendsList || []).length);
+    } catch (e) {}
+}
+function sendFriendRequest() {
+    const input = document.getElementById('friends-search');
+    const raw = input ? String(input.value || '') : '';
+    const pid = raw.replace(/[^0-9]/g, '').substring(0, 6);
+    if (!/^[0-9]{6}$/.test(pid)) {
+        try { if (typeof lobbyToast === 'function') lobbyToast('❌ ID 6 digits ki honi chahiye (jaise #123456).'); } catch (e) {}
+        return;
+    }
+    try { socket.emit('sendFriendRequest', { playerId: pid }); } catch (e) {}
+    if (input) input.value = '';
+}
+function respondFriendRequest(fromKey, accept) {
+    if (!fromKey) return;
+    try { socket.emit('respondFriendRequest', { fromKey: String(fromKey), accept: !!accept }); } catch (e) {}
+}
+// ❌ REMOVE FRIEND — pehle chhota sa confirm popup, phir server se remove.
+function openRemoveFriendConfirm(p) {
+    try {
+        closeRemoveFriendConfirm();
+        const overlay = document.getElementById('name-overlay');
+        if (!overlay || !p || !p.key) return;
+        pendingRemoveFriend = { key: String(p.key), name: String(p.name || 'Player'), playerId: String(p.playerId || '??????') };
+        const pop = document.createElement('div');
+        pop.id = 'friend-remove-confirm';
+        pop.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);z-index:30;';
+        pop.innerHTML = `
+            <div style="background:#0a1740;border:1px solid #444;border-radius:12px;padding:18px;width:300px;max-width:86vw;color:white;font-family:monospace;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,0.6);">
+                <div style="font-size:15px;font-weight:900;">❌ Remove Friend?</div>
+                <div style="font-size:13px;color:#ccc;margin-top:10px;line-height:1.6;">Kya tum <b style="color:#fff;">${escapeHtml(pendingRemoveFriend.name)}</b> <span style="color:#ffd700;">#${escapeHtml(pendingRemoveFriend.playerId)}</span> ko friends se remove karna chahte ho?</div>
+                <div style="display:flex;gap:8px;margin-top:16px;">
+                    <button id="friend-remove-yes-btn" style="flex:1;padding:10px;font-size:13px;font-weight:900;background:#ff4444;color:#fff;border:none;border-radius:6px;cursor:pointer;">✅ Yes, Remove</button>
+                    <button id="friend-remove-no-btn" style="flex:1;padding:10px;font-size:13px;font-weight:900;background:#334155;color:#fff;border:none;border-radius:6px;cursor:pointer;">Cancel</button>
+                </div>
+            </div>
+        `;
+        overlay.appendChild(pop);
+        pop.addEventListener('click', (e) => { if (e.target === pop) closeRemoveFriendConfirm(); });
+        document.getElementById('friend-remove-yes-btn').addEventListener('click', confirmRemoveFriend);
+        document.getElementById('friend-remove-no-btn').addEventListener('click', closeRemoveFriendConfirm);
+    } catch (e) {}
+}
+function closeRemoveFriendConfirm() {
+    try {
+        const pop = document.getElementById('friend-remove-confirm');
+        if (pop) pop.remove();
+        pendingRemoveFriend = null;
+    } catch (e) {}
+}
+function confirmRemoveFriend() {
+    try {
+        if (!pendingRemoveFriend || !pendingRemoveFriend.key) { closeRemoveFriendConfirm(); return; }
+        const k = pendingRemoveFriend.key;
+        // ⚡ Turant list se hatao — server ka jawab aane ka wait na karo.
+        // Poori profile save rakho, taake agar server mana kare to friend wapas la sakein.
+        const full = (friendsList || []).find((f) => f && f.key === k);
+        if (full) pendingRemoveFriend.profile = full;
+        friendsList = (friendsList || []).filter((f) => f && f.key !== k);
+        if (friendsOpen) renderFriendsPanel();
+        try { socket.emit('removeFriend', { key: k }); } catch (e) {}
+        // Popup band karo — pendingRemoveFriend tab tak rakho jab tak server ka jawab na aaye.
+        const pop = document.getElementById('friend-remove-confirm');
+        if (pop) pop.remove();
+    } catch (e) {}
+}
+// 🎮 JOIN FRIEND — uski LOBBY me khade ho jao (game start NAHI hota).
+// Uska character tumhari lobby me side pe khada ho jayega, tumhara
+// apna character hamesha beech me rahega — aur uski screen par uska
+// apna character beech me, tumhara side pe. Agar uski lobby me pehle
+// se ho to yehi button Leave ban jata hai.
+function joinFriend(key, name) {
+    try {
+        if (!key) return;
+        // Pehle se uski lobby me ho to nikal jao (Leave).
+        if (lobbyHostKey && lobbyHostKey === key) { leaveLobby(); return; }
+        const f = (friendsList || []).find((x) => x && x.key === key);
+        const nm = String((f && f.name) || name || 'Friend');
+        if (!f || !f.online) { try { if (typeof lobbyToast === 'function') lobbyToast('⚫ ' + nm + ' offline hai — join nahi kar sakte.'); } catch (e) {} return; }
+        if (f.inGame) { try { if (typeof lobbyToast === 'function') lobbyToast('🎮 ' + nm + ' abhi game me hai — lobby me nahi.'); } catch (e) {} return; }
+        try { socket.emit('joinLobby', { key }); } catch (e) {}
+    } catch (e) {}
+}
+// 🚪 LEAVE LOBBY — dost ki lobby se nikal kar apni khud ki lobby me wapas.
+function leaveLobby() {
+    try { socket.emit('leaveLobby', {}); } catch (e) {}
+    // Turant side characters hatao — server ka jawab aane ka wait nahi.
+    lobbyMembers = [];
+    lobbyHostKey = null;
+    lobbyYouAreHost = false;
+    myReady = false;
+    try { clearLobbySideChars(); } catch (e) {}
+    try { updateReadyButton(); updatePlayButtonsDisabled(); updateLobbyCharName(); } catch (e) {}
+    try { if (friendsOpen) renderFriendsPanel(); } catch (e) {}
+}
+// ✅ READY TOGGLE — dabao to ready, dobara dabao to STOP (un-ready).
+function lobbyGroupHasOthers() { return Array.isArray(lobbyMembers) && lobbyMembers.length > 0; }
+function lobbyGroupAllReady() {
+    if (!myReady) return false;
+    return (lobbyMembers || []).every((m) => m && m.ready === true);
+}
+function updateReadyButton() {
+    try {
+        const btn = document.getElementById('lobby-ready-btn');
+        if (!btn) return;
+        // Ready ho to button STOP ban jaye (dabao to un-ready), warna ✅ READY.
+        setPlayButtonLabel(btn, myReady ? '🛑 STOP' : '✅ READY');
+        btn.style.background = myReady ? '#ff4444' : '#2a6cff';
+        btn.style.boxShadow = myReady ? '0 4px 0 #b91c1c' : '0 4px 0 #1a4dbb';
+    } catch (e) {}
+}
+function toggleReady() {
+    try {
+        myReady = !myReady;
+        try { socket.emit('setReady', { ready: myReady }); } catch (e) {}
+        updateReadyButton();
+        updatePlayButtonsDisabled();
+        updateLobbyCharName(); // naam ke saath ✅ / ❌ badlo.
+        try { if (typeof lobbyToast === 'function') lobbyToast(myReady ? '✅ Tum ready ho! Sab ready hon to PLAY dabao.' : '🛑 Tum un-ready ho gaye.'); } catch (e) {}
+    } catch (e) {}
+}
+// 🎮 PLAY dabao — lobby me aur log hain to sab ready hone chahiye, warna PLAY nahi chalega.
+function tryStartGame(name) {
+    try {
+        if (amBanned || amDisabled) return;
+        if (lobbyGroupHasOthers()) {
+            if (!lobbyGroupAllReady()) {
+                const notReady = (lobbyMembers || []).filter((m) => m && m.ready !== true).map((m) => String(m.name || 'Player'));
+                if (!myReady) notReady.unshift('Tum');
+                try { if (typeof lobbyToast === 'function') lobbyToast('⏳ Sab ready nahi hain — ' + notReady.join(', ') + ' ready nahi hai. READY dabao!'); } catch (e) {}
+                return;
+            }
+            // Sab ready — party start: server baaki members ko bhi game start bhejega.
+            partyPlayPending = true;
+            try { socket.emit('partyPlay', {}); } catch (e) { partyPlayPending = false; }
+            setTimeout(() => { if (partyPlayPending) { partyPlayPending = false; startMatchmaking(name); } }, 5000);
+            return;
+        }
+        startMatchmaking(name);
+    } catch (e) {}
+}
+function closeFriends() {
+    closeRemoveFriendConfirm();
+    const panel = document.getElementById('friends-panel');
+    if (!friendsOpen && !panel) return;
+    if (panel) panel.remove();
+    const right = document.getElementById('lobby-right-panel');
+    if (right) right.style.display = '';
+    restoreLobbyCard();
+    friendsOpen = false;
+}
+// 👥 SHARED LOBBY — doston ke characters apne character ke side pe khade.
+// Apna character hamesha beech me (0,0,0); dost side pe (x = ±1.5, ±3.0...),
+// halka sa beech ki taraf mude hue, naam upar. Skin + gun unki apni.
+function clearLobbySideChars() {
+    try {
+        Object.keys(lobbySideChars).forEach((k) => {
+            const c = lobbySideChars[k];
+            if (c && c.group && lobbyScene) lobbyScene.remove(c.group);
+        });
+        lobbySideChars = {};
+    } catch (e) {}
+}
+function renderLobbySideChars() {
+    try {
+        if (!lobbyScene || !lobbyCharacter) return;
+        clearLobbySideChars();
+        const others = (lobbyMembers || []).filter((m) => m && m.key);
+        others.forEach((m, i) => {
+            const steve = createSteveCharacter('lobby-side-' + m.key, true);
+            // 🎨 Uski apni skin — meri nahi (game wale other-player jaisi logic).
+            if (typeof m.skin === 'string' && m.skin) {
+                const s = decodeSkinCode(m.skin);
+                if (s) applySkinToCharacter(steve, s);
+            } else if (m.skin === '') {
+                restoreSkinToCharacter(steve);
+            } else {
+                const baked = (typeof DEFAULT_SKIN_CODE === 'string' && DEFAULT_SKIN_CODE) ? decodeSkinCode(DEFAULT_SKIN_CODE) : null;
+                if (baked) applySkinToCharacter(steve, baked);
+            }
+            const group = steve.group;
+            // 👥 Position admin ki saved slot se (drag se badli hui) ya default se.
+            const pos = getSideCharSlot(i);
+            group.position.set(pos.x, 0, pos.z);
+            // Halka sa beech ki taraf mudo — jaise main player ko dekh raha ho.
+            group.rotation.order = 'YXZ';
+            group.rotation.set(0, (pos.x > 0 ? -sideCharTurn : sideCharTurn), 0);
+            setPlayerScale(group, sideCharSize);
+            group.userData.sideSlot = i; // drag ke liye — kis slot ko pakda hai.
+            // 🔫 Lobby gun (uski equipped slot-1 gun, AR-9 ya VITA).
+            try {
+                const gg = new THREE.Group();
+                gg.position.set(lobbyGunX, lobbyGunY, lobbyGunZ);
+                gg.rotation.set(0, Math.PI / 2, 0);
+                gg.scale.set(lobbyGunScale, lobbyGunScale, lobbyGunScale);
+                gg.add(m.gun1 === 'vita' ? buildVitaSniper() : buildAR9Gun());
+                group.add(gg);
+            } catch (e) {}
+            const tag = createNameTag((m.ready ? '✅ ' : '❌ ') + String(m.name || 'Player'));
+            tag.position.set(0, 2.05, 0);
+            group.add(tag);
+            lobbyScene.add(group);
+            lobbySideChars[m.key] = { group, nameTag: tag };
+        });
+    } catch (e) {}
+}
+// 👥 SIDE CHARACTER SETTINGS — admin inhe badal kar COPY SIDE LAYOUT se
+// bhejega, main inhe default kar dunga (jaise lobby panels ka layout).
+function getSideCharSlot(i) {
+    try {
+        const raw = localStorage.getItem('pointerx_lobby_side_' + i);
+        if (raw) {
+            const p = JSON.parse(raw);
+            if (p && typeof p.x === 'number' && typeof p.z === 'number') return { x: Math.min(5, Math.max(-5, p.x)), z: Math.min(2.5, Math.max(-1.5, p.z)) };
+        }
+    } catch (e) {}
+    return { x: LOBBY_SIDE_X[i % LOBBY_SIDE_X.length], z: LOBBY_SIDE_Z[i % LOBBY_SIDE_Z.length] || 0 };
+}
+function saveSideCharSlot(i, x, z) {
+    try { localStorage.setItem('pointerx_lobby_side_' + i, JSON.stringify({ x: Math.round(x * 100) / 100, z: Math.round(z * 100) / 100 })); } catch (e) {}
+}
+function setSideCharSize(v) {
+    let n = parseFloat(v);
+    if (isNaN(n)) return;
+    n = Math.min(1, Math.max(0.3, n));
+    sideCharSize = n;
+    try { localStorage.setItem('pointerx_lobby_side_size', String(n)); } catch (e) {}
+    const val = document.getElementById('lobby-side-size-value');
+    if (val) val.textContent = n.toFixed(2);
+    renderLobbySideChars();
+}
+function setSideCharTurn(v) {
+    let n = parseFloat(v);
+    if (isNaN(n)) return;
+    n = Math.min(1.5, Math.max(-1.5, n));
+    sideCharTurn = n;
+    try { localStorage.setItem('pointerx_lobby_side_turn', String(n)); } catch (e) {}
+    const val = document.getElementById('lobby-side-turn-value');
+    if (val) val.textContent = n.toFixed(2);
+    renderLobbySideChars();
+}
+function resetSideChar() {
+    try {
+        localStorage.removeItem('pointerx_lobby_side_size');
+        localStorage.removeItem('pointerx_lobby_side_turn');
+        for (let i = 0; i < 6; i++) localStorage.removeItem('pointerx_lobby_side_' + i);
+    } catch (e) {}
+    sideCharSize = DEFAULT_SIDE_CHAR_SIZE;
+    sideCharTurn = DEFAULT_SIDE_CHAR_TURN;
+    const ss = document.getElementById('lobby-side-size-slider');
+    if (ss) ss.value = String(sideCharSize);
+    const sv = document.getElementById('lobby-side-size-value');
+    if (sv) sv.textContent = sideCharSize.toFixed(2);
+    const ts = document.getElementById('lobby-side-turn-slider');
+    if (ts) ts.value = String(sideCharTurn);
+    const tv = document.getElementById('lobby-side-turn-value');
+    if (tv) tv.textContent = sideCharTurn.toFixed(2);
+    renderLobbySideChars();
+    try { if (typeof lobbyToast === 'function') lobbyToast('✅ Side character reset ho gaya (default size/turn/position).'); } catch (e) {}
+}
+function copySideCharLayout() {
+    try {
+        const slots = [];
+        for (let i = 0; i < 6; i++) { const p = getSideCharSlot(i); slots.push({ x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100 }); }
+        const json = JSON.stringify({ sideChars: { size: sideCharSize, turn: sideCharTurn, slots } });
+        const done = () => { try { if (typeof lobbyToast === 'function') lobbyToast('✅ Side character layout copy ho gaya! Mujhe bhej do, main default kar dunga.'); } catch (e) {} };
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(json).then(done, () => { try { if (typeof lobbyToast === 'function') lobbyToast('Side layout: ' + json); } catch (e) {} });
+            else if (typeof lobbyToast === 'function') lobbyToast('Side layout: ' + json);
+        } catch (e) { try { if (typeof lobbyToast === 'function') lobbyToast('Side layout: ' + json); } catch (e2) {} }
+    } catch (e) {}
+}
+// 🖱️ SIDE CHARACTER DRAG (admin only) — side character ko pakdo aur zameen
+// par khinch lo (left/right + aage/peeche). Position slot ke hisab se save hoti hai.
+let sideCharRaycaster = null;
+function sideCharMeshes() {
+    const out = [];
+    try {
+        Object.keys(lobbySideChars).forEach((k) => {
+            const g = lobbySideChars[k] && lobbySideChars[k].group;
+            if (g) g.traverse((c) => { if (c && c.isMesh) out.push(c); });
+        });
+    } catch (e) {}
+    return out;
+}
+function sideCharGroundPoint(e) {
+    try {
+        if (!lobbyCamera) return null;
+        if (!sideCharRaycaster) sideCharRaycaster = new THREE.Raycaster();
+        const nx = (e.clientX / window.innerWidth) * 2 - 1;
+        const ny = -(e.clientY / window.innerHeight) * 2 + 1;
+        sideCharRaycaster.setFromCamera({ x: nx, y: ny }, lobbyCamera);
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        const pt = new THREE.Vector3();
+        const hit = sideCharRaycaster.ray.intersectPlane(plane, pt);
+        if (!hit) return null;
+        return { x: pt.x, z: pt.z };
+    } catch (e) { return null; }
+}
+function sideCharSlotFromHit(hit) {
+    try {
+        let o = hit && hit.object;
+        while (o) {
+            if (o.userData && typeof o.userData.sideSlot === 'number') return o.userData.sideSlot;
+            o = o.parent;
+        }
+    } catch (e) {}
+    return -1;
+}
+function sideCharOverlayMouseDown(e) {
+    try {
+        if (!isLobbyLayoutMod()) return; // sirf admin drag kar sakta hai
+        if (gameStarted) return; // game me nahi, sirf lobby me
+        if (skinEditorOpen || inventoryOpen || storeOpen || friendsOpen) return;
+        if (!lobbyScene || !lobbyCamera || !lobbyCharacter) return;
+        if (e.button !== 0) return;
+        const overlay = document.getElementById('name-overlay');
+        if (!overlay || e.target !== overlay) return;
+        const meshes = sideCharMeshes();
+        if (!meshes.length) return;
+        if (!sideCharRaycaster) sideCharRaycaster = new THREE.Raycaster();
+        const nx = (e.clientX / window.innerWidth) * 2 - 1;
+        const ny = -(e.clientY / window.innerHeight) * 2 + 1;
+        sideCharRaycaster.setFromCamera({ x: nx, y: ny }, lobbyCamera);
+        const hits = sideCharRaycaster.intersectObjects(meshes, false);
+        if (!hits.length) return;
+        const slot = sideCharSlotFromHit(hits[0]);
+        if (slot < 0) return;
+        const gp = sideCharGroundPoint(e);
+        if (!gp) return;
+        const entry = Object.keys(lobbySideChars).map((k) => lobbySideChars[k]).find((c) => c && c.group && c.group.userData.sideSlot === slot);
+        const g = entry && entry.group;
+        if (!g) return;
+        sideCharDragging = { slot, startX: g.position.x, startZ: g.position.z, startPlaneX: gp.x, startPlaneZ: gp.z, startClientX: e.clientX, startClientY: e.clientY, moved: false };
+        try { e.preventDefault(); } catch (e2) {}
+    } catch (e) {}
+}
+function sideCharOverlayMouseMove(e) {
+    try {
+        if (!sideCharDragging) return;
+        if (e.buttons === 0) { sideCharDragging = null; return; }
+        const gp = sideCharGroundPoint(e);
+        if (!gp) return;
+        const d = sideCharDragging;
+        if (Math.abs(e.clientX - d.startClientX) > 6 || Math.abs(e.clientY - d.startClientY) > 6) d.moved = true;
+        const nx = Math.min(5, Math.max(-5, d.startX + (gp.x - d.startPlaneX)));
+        const nz = Math.min(2.5, Math.max(-1.5, d.startZ + (gp.z - d.startPlaneZ)));
+        const entry = Object.keys(lobbySideChars).map((k) => lobbySideChars[k]).find((c) => c && c.group && c.group.userData.sideSlot === d.slot);
+        const g = entry && entry.group;
+        if (g) g.position.set(nx, 0, nz);
+    } catch (e) {}
+}
+function sideCharOverlayMouseUp(e) {
+    try {
+        if (!sideCharDragging) return;
+        const d = sideCharDragging;
+        sideCharDragging = null;
+        if (!d.moved) return; // click tha, drag nahi
+        const entry = Object.keys(lobbySideChars).map((k) => lobbySideChars[k]).find((c) => c && c.group && c.group.userData.sideSlot === d.slot);
+        const g = entry && entry.group;
+        if (!g) return;
+        saveSideCharSlot(d.slot, g.position.x, g.position.z);
+        try { if (typeof lobbyToast === 'function') lobbyToast('✅ Side character ki position save ho gayi — COPY SIDE LAYOUT se mujhe bhej do.'); } catch (e2) {}
+    } catch (e) {}
 }
 
 function hideLobbyExtras() {
@@ -4577,7 +5357,7 @@ function showGoogleNamePrompt(user) {
         let finalName = input ? input.value.trim() : "GoogleUser";
         if (finalName === "") finalName = "GoogleUser";
         localStorage.setItem(`pointerx_user_${user.uid}`, finalName);
-        startMatchmaking(finalName); // 🔍 Pehle SEARCHING, phir MATCH FOUND, phir game.
+        tryStartGame(finalName); // 🔍 Pehle SEARCHING, phir MATCH FOUND, phir game (party ho to sab ready chahiye).
     });
     const logoutBtn = document.getElementById('prompt-logout-btn');
     if (logoutBtn) logoutBtn.addEventListener('click', () => {
@@ -4644,7 +5424,7 @@ function initNamePrompt() {
             let pName = input ? input.value.trim() : "Player";
             if (pName === "") pName = "Player";
             localStorage.setItem('pointerx_guest_name', pName);
-            startMatchmaking(pName); // 🔍 Pehle SEARCHING, phir MATCH FOUND, phir game.
+            tryStartGame(pName); // 🔍 Pehle SEARCHING, phir MATCH FOUND, phir game (party ho to sab ready chahiye).
         });
     }
 }
@@ -4873,6 +5653,11 @@ function startGameWithPlayer(name) {
     }
     matchmakingActive = false; // 🔍 Matchmaking khatam — game shuru.
     playerName = name;
+    // 🎮 Friends ko batao: main game me aa gaya (unki list me 'Game me' + Join milega).
+    try { socket.emit('playerState', { inGame: true }); } catch (e) {}
+    // ✅ Game me ghus gaye — ready khatam (lobby wapas aao to dobara READY dabana).
+    myReady = false;
+    try { updateReadyButton(); } catch (e) {}
     try { closeSkinEditor(); } catch (e) {}
     try { removeLobbyCharacter(); } catch (e) {}
     // 🌑 Apne player ka shadow body (pehli baar PLAY par banta hai).
@@ -5055,18 +5840,26 @@ function init() {
             shoot(e); // 🔫 AR-9 ki awaz shoot() me bajti hai (pehli goli).
         } 
         else if (e.button === 2) { 
-            isAiming = true; 
-            camera.fov = aimedFOV;
-            camera.updateProjectionMatrix();
+            // 🔭 VITA haath me ho to sniper scope, warna halka ADS zoom.
+            if (currentWeapon === 1 && equippedGun1 === 'vita') {
+                setScope(true);
+            } else {
+                isAiming = true; 
+                camera.fov = aimedFOV;
+                camera.updateProjectionMatrix();
+            }
         }
     });
 
     window.addEventListener('mouseup', (e) => {
         if (e.button === 0) { isMouseHeld = false; stopAutoShotSounds(); } // 🔫 AR-9: chorte hi awaz TURANT band.
         if (e.button === 2) { 
-            isAiming = false; 
-            camera.fov = normalFOV;
-            camera.updateProjectionMatrix();
+            if (isScoped) { setScope(false); }
+            else {
+                isAiming = false; 
+                camera.fov = normalFOV;
+                camera.updateProjectionMatrix();
+            }
         }
     });
 
@@ -5154,6 +5947,15 @@ function init() {
         const secs = totalSeconds % 60;
         matchTimerString = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
         updateHUD();
+        // 🌞🌙 Day/night SYNC — server ke match timer se sab players ko
+        // ek hi time dikhe (raat ho to sab ko raat, din ho to sab ko din).
+        // Match 600s = cycle 600s, is liye gameTime = 600 - matchTimeLeft.
+        // Har second server se set hota hai (join karte hi bhi mil jata hai);
+        // beech me local gameTime += dt se smooth chalta hai.
+        try {
+            const t = Math.max(0, Math.min(DAY_NIGHT_CYCLE, Number(totalSeconds) || 0));
+            gameTime = DAY_NIGHT_CYCLE - t;
+        } catch (e) {}
     });
 
     socket.on('playerStatsUpdate', (data) => {
@@ -5315,6 +6117,158 @@ function init() {
             if (typeof lobbyToast === 'function') lobbyToast('❌ ' + msg);
         } catch (e) {}
     });
+    // 👥 FRIENDS — server se friends list + incoming requests aati hain.
+    socket.on('friendsUpdate', (data) => {
+        try {
+            if (!data || typeof data !== 'object') return;
+            if (Array.isArray(data.friends)) friendsList = data.friends;
+            if (Array.isArray(data.requests)) friendRequests = data.requests;
+            updateFriendsBadge();
+            if (friendsOpen) renderFriendsPanel();
+        } catch (e) {}
+    });
+    socket.on('friendRequestReceived', (data) => {
+        try {
+            if (!data || !data.from) return;
+            const f = data.from;
+            if (!friendRequests.some((x) => String(x.key || '') === String(f.key || ''))) friendRequests.push(f);
+            updateFriendsBadge();
+            const nm = String(f.name || 'Player');
+            const pid = String(f.playerId || '??????');
+            try { showGameNotification('📩 Naya friend request: ' + nm + ' (#' + pid + ')'); } catch (e) {}
+            try { if (typeof lobbyToast === 'function') lobbyToast('📩 ' + nm + ' (#' + pid + ') ne friend request bheji! FRIENDS → F.Req dekho.'); } catch (e) {}
+            if (friendsOpen) renderFriendsPanel();
+        } catch (e) {}
+    });
+    socket.on('friendRequestResult', (data) => {
+        try {
+            const ok = !!(data && data.ok);
+            const r = (data && data.reason) || 'unknown';
+            if (typeof lobbyToast !== 'function') return;
+            if (ok) {
+                lobbyToast(r === 'accepted-mutual' ? '🤝 Dono ne ek dusre ko request bheji thi — ab friends ho!' : 'You have sent a Friend Request');
+            } else {
+                const msg = r === 'not-found' ? 'Is #ID ka koi player nahi mila.' : r === 'already-friends' ? 'Ye pehle se friend hai.' : r === 'already-sent' ? 'You have already sent a friend request' : r === 'self' ? 'Apni ID par request nahi bhej sakte.' : r === 'bad-id' ? 'ID 6 digits ki honi chahiye.' : 'Request nahi bheji gayi.';
+                lobbyToast('❌ ' + msg);
+            }
+        } catch (e) {}
+    });
+    socket.on('friendRequestAccepted', (data) => {
+        try {
+            const nm = String((data && data.by && data.by.name) || 'Player');
+            const pid = String((data && data.by && data.by.playerId) || '??????');
+            try { showGameNotification('🤝 ' + nm + ' (#' + pid + ') ne friend request accept kar li!'); } catch (e) {}
+            try { if (typeof lobbyToast === 'function') lobbyToast('🤝 ' + nm + ' (#' + pid + ') ne friend request accept kar li!'); } catch (e) {}
+            if (friendsOpen) renderFriendsPanel();
+        } catch (e) {}
+    });
+    socket.on('friendRequestDeclined', (data) => {
+        try {
+            const nm = String((data && data.by && data.by.name) || 'Player');
+            try { if (typeof lobbyToast === 'function') lobbyToast('❌ ' + nm + ' ne friend request decline kar di.'); } catch (e) {}
+            if (friendsOpen) renderFriendsPanel();
+        } catch (e) {}
+    });
+    // ❌ REMOVE FRIEND — server se result + doosre player ko notification.
+    socket.on('removeFriendResult', (data) => {
+        try {
+            const ok = !!(data && data.ok);
+            if (ok) {
+                const rm = (data && data.removed) || {};
+                const nm = String(rm.name || (pendingRemoveFriend && pendingRemoveFriend.name) || 'Player');
+                const pid = String(rm.playerId || (pendingRemoveFriend && pendingRemoveFriend.playerId) || '??????');
+                try { if (typeof lobbyToast === 'function') lobbyToast('✅ ' + nm + ' (#' + pid + ') friends se remove ho gaya.'); } catch (e) {}
+                pendingRemoveFriend = null;
+            } else {
+                const r = (data && data.reason) || 'unknown';
+                // Server ne mana kar diya — friend ko list me wapas lao.
+                if (pendingRemoveFriend && pendingRemoveFriend.profile) {
+                    const back = pendingRemoveFriend.profile;
+                    if (!(friendsList || []).some((f) => f && f.key === back.key)) friendsList = (friendsList || []).concat([back]);
+                }
+                pendingRemoveFriend = null;
+                try { if (typeof lobbyToast === 'function') lobbyToast('❌ Remove nahi hua' + (r === 'not-friends' ? ' — ye pehle se friend nahi hai.' : r === 'save-failed' ? ' — server friends.json save nahi kar paya (server ke terminal me error dekho).' : '.')); } catch (e) {}
+            }
+            if (friendsOpen) renderFriendsPanel();
+        } catch (e) {}
+    });
+    socket.on('friendRemoved', (data) => {
+        try {
+            const by = (data && data.by) || {};
+            const nm = String(by.name || 'Player');
+            const pid = String(by.playerId || '??????');
+            try { showGameNotification('❌ ' + nm + ' (#' + pid + ') ne tumhe friends se remove kar diya.'); } catch (e) {}
+            try { if (typeof lobbyToast === 'function') lobbyToast('❌ ' + nm + ' (#' + pid + ') ne tumhe friends se remove kar diya.'); } catch (e) {}
+            if (friendsOpen) renderFriendsPanel();
+        } catch (e) {}
+    });
+    // 👥 SHARED LOBBY — group badla to side characters dobara banao.
+    socket.on('lobbyUpdate', (data) => {
+        try {
+            if (!data || typeof data !== 'object') return;
+            lobbyHostKey = (typeof data.hostKey === 'string' && data.hostKey) ? data.hostKey : null;
+            lobbyYouAreHost = !!data.youAreHost;
+            lobbyMembers = Array.isArray(data.members) ? data.members : [];
+            // Server hi meri ready state ka source hai (group dissolve par false ho jati hai).
+            myReady = !!data.youReady;
+            renderLobbySideChars();
+            updateReadyButton();
+            updatePlayButtonsDisabled();
+            updateLobbyCharName(); // naam ke saath ✅ / ❌ badlo.
+            if (friendsOpen) renderFriendsPanel();
+        } catch (e) {}
+    });
+    // 🎮 PARTY PLAY — sab ready the, host/member ne PLAY dabaya: partyGameStart aaya to game shuru.
+    socket.on('partyPlayResult', (data) => {
+        try {
+            partyPlayPending = false;
+            if (data && data.ok) {
+                startMatchmaking(myProfileName() || playerName || 'Player');
+            } else {
+                const r = (data && data.reason) || 'unknown';
+                const who = Array.isArray(data && data.notReady) && data.notReady.length ? data.notReady.join(', ') : '';
+                try { if (typeof lobbyToast === 'function') lobbyToast(r === 'not-ready' ? ('⏳ Sab ready nahi hain' + (who ? ' — ' + who + ' ready nahi hai.' : '.')) : '❌ Party start nahi hua.'); } catch (e) {}
+                updatePlayButtonsDisabled();
+            }
+        } catch (e) {}
+    });
+    socket.on('partyGameStart', (data) => {
+        try {
+            const by = (data && data.by) || {};
+            const nm = String(by.name || 'Player');
+            try { if (typeof lobbyToast === 'function') lobbyToast('🎮 Sab ready — ' + nm + ' ne game start kar diya!'); } catch (e) {}
+            startMatchmaking(myProfileName() || playerName || 'Player');
+        } catch (e) {}
+    });
+    socket.on('joinLobbyResult', (data) => {
+        try {
+            const ok = !!(data && data.ok);
+            if (ok) {
+                const hn = String((data && data.hostName) || 'Friend');
+                try { if (typeof lobbyToast === 'function') lobbyToast('🎮 ' + hn + ' ki lobby me aa gaye — uska character side pe khada hai, tumhara beech me!'); } catch (e) {}
+            } else {
+                const r = (data && data.reason) || 'unknown';
+                const msg = r === 'offline' ? 'wo offline hai.' : r === 'in-game' ? 'wo abhi game me hai — lobby me nahi.' : r === 'already-there' ? 'tum pehle se uski lobby me ho.' : r === 'self' ? 'apni lobby join nahi kar sakte.' : 'join nahi hua.';
+                try { if (typeof lobbyToast === 'function') lobbyToast('❌ Join nahi hua — ' + msg); } catch (e) {}
+            }
+            if (friendsOpen) renderFriendsPanel();
+        } catch (e) {}
+    });
+    socket.on('lobbyJoined', (data) => {
+        try {
+            const by = (data && data.by) || {};
+            const nm = String(by.name || 'Player');
+            try { showGameNotification('👥 ' + nm + ' tumhari lobby me aa gaya!'); } catch (e) {}
+            try { if (typeof lobbyToast === 'function') lobbyToast('👥 ' + nm + ' tumhari lobby me aa gaya!'); } catch (e) {}
+        } catch (e) {}
+    });
+    socket.on('lobbyLeft', (data) => {
+        try {
+            const by = (data && data.by) || {};
+            const nm = String(by.name || 'Player');
+            try { if (typeof lobbyToast === 'function') lobbyToast('🚪 ' + nm + ' lobby se chala gaya.'); } catch (e) {}
+        } catch (e) {}
+    });
 
     socket.on('playerMoved', (data) => {
         if (otherPlayers[data.id]) {
@@ -5383,6 +6337,7 @@ function init() {
 
     socket.on('playerDied', (data) => {
         if (data.id === socket.id) {
+            if (isScoped) setScope(false); // 🔭 Mar gaye to scope band karo.
             isDeadLocal = true;
             stopAutoShotSounds(); // 🔫 Mar gaye to AR-9 ki awaz band.
             myHealth = 0;
@@ -5402,6 +6357,9 @@ function init() {
             myHealth = 100;
             bhopBonus = 0;
             bhopChain = 0;
+            // 🌙 Respawn = zameen par (landing nahi) — pehle jump karo, phir bhop.
+            canJump = true;
+            bhopLandUntil = 0; bhopTapArmed = false; bhopJumpUntil = 0; bhopBoostUntil = 0;
             hideRespawnScreen();
             camera.position.set(data.player.x, playerHeight, data.player.z);
         }
@@ -5474,6 +6432,12 @@ function injectHudStyles() {
 #score-dots .score-label{font-size:11px!important;letter-spacing:2px!important;color:rgba(255,255,255,0.72)!important;font-weight:bold!important;}
 #score-dots .score-value{font-size:18px!important;font-weight:bold!important;font-variant-numeric:tabular-nums!important;}
 #score-dots .score-dot{width:8px!important;height:8px!important;border-radius:50%!important;margin-right:7px!important;vertical-align:middle!important;display:inline-block!important;}
+/* 🌍 W.W.P list scrollbar — hamesha dikhe (cyan, theme wala), taake list scroll ho to pata chale. */
+#wwp-list{scrollbar-width:thin!important;scrollbar-color:#00d2ff rgba(255,255,255,0.08)!important;}
+#wwp-list::-webkit-scrollbar{width:10px!important;}
+#wwp-list::-webkit-scrollbar-track{background:rgba(255,255,255,0.06)!important;border-radius:5px!important;}
+#wwp-list::-webkit-scrollbar-thumb{background:#00d2ff!important;border-radius:5px!important;border:2px solid rgba(0,0,0,0.88)!important;}
+#wwp-list::-webkit-scrollbar-thumb:hover{background:#00aacc!important;}
 `;
     document.head.appendChild(st);
     hudStylesInjected = true;
@@ -5604,6 +6568,7 @@ function matchKDR(kills, deaths) {
 }
 function showMatchResults(board) {
     if (typeof document === 'undefined') return;
+    if (isScoped) setScope(false); // 🔭 Match khatam to scope band karo.
     matchResultsOpen = true;
     try { document.exitPointerLock(); } catch (e) {}
     // Blocker (Click to Start) results panel ke peeche na aaye.
@@ -5670,7 +6635,7 @@ function renderMatchResults(board) {
 }
 function matchResultsRowHtml(p, rank, isMe) {
     const nm = String(p.name || 'Player');
-    const pid = String(p.playerId || '?????');
+    const pid = String(p.playerId || '??????');
     const kills = p.kills || 0, deaths = p.deaths || 0;
     const coins = (typeof p.coins === 'number') ? p.coins : (kills * 100 + deaths * 10);
     const acc = (p.accuracy === null || typeof p.accuracy === 'undefined') ? '—' : (p.accuracy + '%');
@@ -6144,6 +7109,7 @@ function switchWeapon(n) {
     if (!gameStarted || isDeadLocal) return;
     if (n === currentWeapon) return;
     if (n < 1 || n > 3) return;
+    if (isScoped) setScope(false); // 🔭 Weapon badla to scope pehle band karo.
     stopAutoShotSounds(); // 🔫 Weapon badla to AR-9 ki awaz band (daba hua button bhi).
     currentWeapon = n;
     // 💪 Pushups me gun nahi dikhti (chahe weapon switch karo).
@@ -6498,13 +7464,16 @@ function setupPointerLock() {
             if (blocker) blocker.style.display = 'none';
         } else {
             isLocked = false;
+            // 🔭 Pointer lock chhuta (Esc/chat/editor) to scope band karo.
+            if (isScoped) setScope(false);
             // 🏁 Results panel khula ho to blocker (Click to Start) na dikhao.
             if (gameStarted && !isDeadLocal && !matchResultsOpen && blocker) { blocker.style.display = 'flex'; }
         }
     });
     document.addEventListener('mousemove', (e) => {
         if (!isLocked || !gameStarted) return;
-        const mouseSensitivity = 0.002;
+        // 🔭 Scope me mouse halka (35%) — nishana bilkul theek lage.
+        const mouseSensitivity = isScoped ? 0.0007 : 0.002;
         pitch -= e.movementY * mouseSensitivity;
         pitch = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, pitch));
         // Mouse left/right: poora banda (body) ghoomta hai — head alag se
@@ -6734,7 +7703,8 @@ function injectMobileLobbyStyles() {
         #name-overlay { overflow-y: auto !important; overflow-x: hidden !important; height: calc(var(--vh, 1vh) * 100) !important; }
         canvas { height: calc(var(--vh, 1vh) * 100) !important; }
         body { height: calc(var(--vh, 1vh) * 100) !important; overflow: hidden !important; }
-        #lobby-title { left: 50% !important; top: calc(var(--vh, 1vh) * 1) !important; transform: translateX(-50%) !important; font-size: clamp(16px, 2.6vw, 26px) !important; letter-spacing: 1px !important; }
+        #lobby-title { left: 50% !important; top: calc(var(--vh, 1vh) * 1) !important; transform: translateX(-50%) !important; }
+        #lobby-logo-img { width: min(220px, 58vw) !important; height: auto !important; }
         [data-lobby-item="playercard"] { left: 1vw !important; top: calc(var(--vh, 1vh) * 2) !important; width: 24vw !important; min-width: 170px !important; padding: calc(var(--vh, 1vh) * 1.5) 1vw !important; font-size: clamp(11px, 1.5vw, 14px) !important; }
         [data-lobby-item="pfp"] { left: 26vw !important; top: calc(var(--vh, 1vh) * 2) !important; width: 6.5vw !important; height: 6.5vw !important; min-width: 44px !important; min-height: 44px !important; }
         [data-lobby-item="menu_HUB"] { left: 1vw !important; top: calc(var(--vh, 1vh) * 34) !important; width: 13.5vw !important; min-width: 100px !important; padding: calc(var(--vh, 1vh) * 1.2) 1vw !important; font-size: clamp(11px, 1.5vw, 14px) !important; }
@@ -6746,6 +7716,7 @@ function injectMobileLobbyStyles() {
         [data-lobby-item="menu_EDITOR"] { left: 15.5vw !important; top: calc(var(--vh, 1vh) * 54) !important; width: 13.5vw !important; min-width: 100px !important; padding: calc(var(--vh, 1vh) * 1.2) 1vw !important; font-size: clamp(11px, 1.5vw, 14px) !important; }
         [data-lobby-item="menu_SKINS"] { left: 15.5vw !important; top: calc(var(--vh, 1vh) * 64) !important; width: 13.5vw !important; min-width: 100px !important; padding: calc(var(--vh, 1vh) * 1.2) 1vw !important; font-size: clamp(11px, 1.5vw, 14px) !important; }
         [data-lobby-item="play"] { left: auto !important; right: 1.5vw !important; top: auto !important; bottom: calc(var(--vh, 1vh) * 3) !important; width: 16vw !important; min-width: 110px !important; padding: calc(var(--vh, 1vh) * 1.8) 1vw !important; font-size: clamp(16px, 2.4vw, 22px) !important; }
+        [data-lobby-item="ready"] { left: 1.5vw !important; right: auto !important; top: auto !important; bottom: calc(var(--vh, 1vh) * 3) !important; width: 16vw !important; min-width: 110px !important; padding: calc(var(--vh, 1vh) * 1.8) 1vw !important; font-size: clamp(16px, 2.4vw, 22px) !important; }
         [data-lobby-item="charname"] { left: 50% !important; top: calc(var(--vh, 1vh) * 46) !important; transform: translateX(-50%) !important; width: 20vw !important; min-width: 150px !important; height: calc(var(--vh, 1vh) * 7) !important; min-height: 26px !important; font-size: clamp(11px, 1.5vw, 14px) !important; }
         [data-lobby-item="logout"] { left: auto !important; right: 1vw !important; top: calc(var(--vh, 1vh) * 2) !important; width: 10vw !important; min-width: 74px !important; padding: calc(var(--vh, 1vh) * 1) 1vw !important; font-size: clamp(10px, 1.3vw, 12px) !important; }
         [data-lobby-item="private"], [data-lobby-item="join"], [data-lobby-item="play_settings"], [data-lobby-item="copy_layout"], [data-lobby-item="reset_layout"], [data-lobby-item="wwp"] { display: none !important; }
@@ -6821,13 +7792,20 @@ function updateRotateOverlay() {
 function performJump() {
     if (isDeadLocal || !gameStarted) return false;
     if (isDoingPushups) return false; // Pushups me jump nahi (zameen par lete ho).
-    // 🌙 MOON JUMP (bhop) — land ke baad Shift tap (daba + chora) phir jump.
-    // Normal jump se zyada uncha (14 vs 8.5). Zameen par hota hai.
-    if (canJump && !isCrouching && bhopTapArmed && performance.now() <= bhopJumpUntil) {
+    // 🌙 BHOP — pehle NORMAL jump karo, land karo, phir Shift dabao +
+    // choro + Space → moon jump. Standstill par moon jump nahi (pehle
+    // jump zaroori hai). W/A/S/D daba ho to moon jump us direction me
+    // thoda push bhi deta hai (500ms tak speed 1.8x). Repeat karo, chain banta hai.
+    // Shift release + Space ek saath dabao to event order se farq nahi
+    // parta: Space pehle aaye to Shift abhi daba hua hota hai (isCrouching,
+    // aur arm abhi ka hai), Shift pehle chhute to bhopJumpUntil window khuli hoti hai.
+    if (canJump && bhopTapArmed && (performance.now() <= bhopJumpUntil || (isCrouching && performance.now() - bhopArmTime <= BHOP_JUMP_WINDOW_MS))) {
         velocity.y = MOON_JUMP_VELOCITY;
         bhopTapArmed = false;
         bhopJumpUntil = 0;
         canJump = false;
+        // 🌙 Directional push — W/A/S/D ke hisab se aage/peeche/left/right.
+        bhopBoostUntil = performance.now() + BHOP_BOOST_MS;
         playSound('jump');
         try { showGameNotification('🌙 MOON JUMP!'); } catch (e) {}
         return true;
@@ -6849,6 +7827,7 @@ function setPushups(on) {
     if (!gameStarted || isDeadLocal) on = false;
     if (on === isDoingPushups) return;
     isDoingPushups = on;
+    if (on && isScoped) setScope(false); // 🔭 Pushups shuru to scope band karo.
     if (gun) gun.visible = !on && currentWeapon === 1;
     if (pistol) pistol.visible = !on && currentWeapon === 2;
     if (knife) knife.visible = !on && currentWeapon === 3;
@@ -6905,7 +7884,7 @@ function onKeyDown(e) {
             isCrouching = true;
             // 🌙 Bhop tap arm — land karne ke foran baad (300ms) Shift
             // dabao to moon jump ke liye ready. Der se dabao to sirf crouch.
-            if (canJump && performance.now() <= bhopLandUntil && gameStarted && !isDeadLocal) bhopTapArmed = true;
+            if (canJump && performance.now() <= bhopLandUntil && gameStarted && !isDeadLocal) { bhopTapArmed = true; bhopArmTime = performance.now(); }
             break;
         case 'Space': performJump(); break;
     }
@@ -7051,8 +8030,15 @@ function animate() {
     // halki pitch (up/down) + roll (side tilt), gun ke bob se sync.
     // Mara hua / results panel khula ho to bob band.
     const camBob = camBobAmount * ((isDeadLocal || matchResultsOpen) ? 0 : 1);
-    camera.rotation.x = pitch + Math.sin(viewBobPhase * 2) * 0.012 * camBob;
-    camera.rotation.z = Math.sin(viewBobPhase) * 0.008 * camBob;
+    // 📷 LANDING SHAKE — jump ke baad land par camera halka shake, phir
+    // jaldi khatam (decay). Moon jump = zyada shake (landShake 1 tak).
+    if (landShake > 0) {
+        landShake = Math.max(0, landShake - delta * 3.5);
+        landShakePhase += delta * 30;
+    }
+    const landShakeAmt = landShake * ((isDeadLocal || matchResultsOpen) ? 0 : 1);
+    camera.rotation.x = pitch + Math.sin(viewBobPhase * 2) * 0.012 * camBob + Math.sin(landShakePhase) * 0.016 * landShakeAmt;
+    camera.rotation.z = Math.sin(viewBobPhase) * 0.008 * camBob + Math.cos(landShakePhase * 0.9) * 0.010 * landShakeAmt;
 
     // 🔪 Knife swing animation — chhuri tezi se ghumao, phir wapas.
     // Swing base (diagonal) pose ke upar hota hai, usko khatam nahi karta.
@@ -7202,6 +8188,9 @@ function animate() {
         targetPlayerHeight = isDoingPushups ? (0.45 + pushupBobLocal) : (isCrouching ? 1.0 : 1.62);
         playerHeight += (targetPlayerHeight - playerHeight) * 15.0 * delta;
         let moveSpeed = isDoingPushups ? 0 : (isCrouching ? 4.0 : 8.0); // Pushups me chal nahi sakte.
+        // 🌙 Moon jump push — moon jump ke baad 500ms tak tez (W=forward,
+        // A=left, D=right, S=back — jo daba ho usi direction me push).
+        if (!isDoingPushups && performance.now() <= bhopBoostUntil) moveSpeed *= BHOP_BOOST_MULT;
 
         let inputX = (moveRight ? 1 : 0) - (moveLeft ? 1 : 0);
         let inputZ = (moveForward ? 1 : 0) - (moveBackward ? 1 : 0);
@@ -7229,14 +8218,28 @@ function animate() {
         camera.position.y += velocity.y * delta;
 
         if (camera.position.y <= playerHeight) {
+            // 🌙 Asal landing (jump ke baad zameen) — sirf tab bhop window kholo.
+            // Zameen par khade rehte hue har frame nahi (warna standstill par
+            // bhi moon jump ho jata). Pehle jump karo, phir land, phir bhop.
+            // canJump false tha = hawa me the (jump kiya tha); true tha = pehle
+            // se zameen par khade the (spawn/standstill — landing nahi).
+            const justLanded = !canJump;
+            if (justLanded) {
+                // 📷 LANDING SHAKE — jump ke baad zameen par aate hi camera halka
+                // shake (thud feel). Girne ki speed -5 se tez ho to shake.
+                if (velocity.y < -5) {
+                    landShake = Math.min(1, Math.abs(velocity.y) / 12);
+                    landShakePhase = 0;
+                }
+                // 🌙 Land ho gaye — ab 300ms me Shift dabao to bhop tap armed.
+                // (Har landing par naya window; tap/jump windows reset.)
+                bhopLandUntil = performance.now() + BHOP_LAND_WINDOW_MS;
+                bhopTapArmed = false;
+                bhopJumpUntil = 0;
+            }
             velocity.y = 0;
             canJump = true;
             camera.position.y = playerHeight;
-            // 🌙 Land ho gaye — ab 300ms me Shift dabao to bhop tap armed.
-            // (Har landing par naya window; tap/jump windows reset.)
-            bhopLandUntil = performance.now() + BHOP_LAND_WINDOW_MS;
-            bhopTapArmed = false;
-            bhopJumpUntil = 0;
         }
 
         // 🔫 AR-9 FULL-AUTO — left click dabaye rakho to rifle lagatar

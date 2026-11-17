@@ -39,11 +39,21 @@ loadRegisteredPlayers();
 // wahi entry), guest ki playerId se (guest ki koi uid nahi hoti).
 function playerRegKey(profile, pid) {
     const uid = String((profile && profile.uid) || '').trim();
-    if (profile && profile.isGoogle && uid) return 'g_' + uid.replace(/[^A-Za-z0-9_-]/g, '_').substring(0, 64);
-    return 'id_' + pid;
+    if (uid) {
+        const clean = uid.replace(/[^A-Za-z0-9_-]/g, '_').substring(0, 64);
+        if (profile && profile.isGoogle) return 'g_' + clean;
+        return 'guest_' + clean; // guest ka stable browser UID — alag pehchan.
+    }
+    return 'id_' + pid; // purana client (uid nahi bhejta) — fallback.
 }
 function isPlayerOnline(regKey) {
     return Object.keys(players).some((id) => players[id] && players[id].regKey === regKey);
+}
+function isPlayerInGame(regKey) {
+    return Object.keys(players).some((id) => players[id] && players[id].regKey === regKey && players[id].inGame === true);
+}
+function isPlayerReady(regKey) {
+    return Object.keys(players).some((id) => players[id] && players[id].regKey === regKey && players[id].ready === true);
 }
 function publicPlayerList() {
     return Object.keys(registeredPlayers).map((k) => {
@@ -52,7 +62,7 @@ function publicPlayerList() {
             key: k,
             socketId: '',
             name: p.name || 'Player',
-            playerId: p.playerId || '?????',
+            playerId: p.playerId || '??????',
             pfp: p.pfp || '',
             email: p.email || '',
             isGoogle: !!p.isGoogle,
@@ -102,6 +112,127 @@ function deliverGiftToPlayer(regKey, gift) {
     return 'pending';
 }
 
+// 👥 FRIENDS — player apne #ID se friend request bhejta hai (6 digits).
+// Requests + friendships friends.json me save hoti hain (server restart par
+// bhi rehti hain). Offline player ko request pending rehti hai — login par
+// F.Req me dikh jati hai. Accept → dono friends; Decline → request khatam.
+const FRIENDS_FILE = path.join(__dirname, 'friends.json');
+let friendsData = { requests: [], friendships: {} }; // requests: [{fromKey,toKey,at}], friendships: {regKey:[regKey]}
+function loadFriendsData() {
+    try {
+        if (fs.existsSync(FRIENDS_FILE)) {
+            const raw = fs.readFileSync(FRIENDS_FILE, 'utf8');
+            const parsed = JSON.parse(raw || '{}');
+            if (parsed && typeof parsed === 'object') {
+                if (Array.isArray(parsed.requests)) friendsData.requests = parsed.requests;
+                if (parsed.friendships && typeof parsed.friendships === 'object') friendsData.friendships = parsed.friendships;
+            }
+        }
+    } catch (e) { friendsData = { requests: [], friendships: {} }; }
+    console.log('Friends file: ' + FRIENDS_FILE);
+    console.log(`Friends: ${friendsData.requests.length} pending requests, ${Object.keys(friendsData.friendships).length} players with friends loaded`);
+}
+function saveFriendsData() {
+    // ⚠️ Save fail ho to chup mat raho — warna remove sirf memory me hota hai
+    // aur server restart par friend wapas aa jata hai (friends.json purani rehti hai).
+    try { fs.writeFileSync(FRIENDS_FILE, JSON.stringify(friendsData, null, 2), 'utf8'); return true; }
+    catch (e) { console.error('Friends save FAILED (' + FRIENDS_FILE + '): ' + (e && e.message ? e.message : e)); return false; }
+}
+loadFriendsData();
+function findRegKeyByPlayerId(pid) {
+    const id = String(pid || '').replace(/[^0-9]/g, '').substring(0, 6);
+    if (!/^[0-9]{6}$/.test(id)) return null;
+    const k = Object.keys(registeredPlayers).find((key) => registeredPlayers[key] && registeredPlayers[key].playerId === id);
+    return k || null;
+}
+function publicFriendProfile(regKey) {
+    const p = registeredPlayers[regKey] || {};
+    return { key: regKey, name: p.name || 'Player', playerId: p.playerId || '??????', pfp: p.pfp || '', online: isPlayerOnline(regKey), inGame: isPlayerInGame(regKey), ready: isPlayerReady(regKey) };
+}
+// 👥 SHARED LOBBY — ek player ki lobby me khade hone wale members.
+// players[sid].lobbyWith = host ki regKey (null = apni khud ki lobby).
+function publicLobbyMember(regKey) {
+    const p = registeredPlayers[regKey] || {};
+    const sid = findSocketIdByRegKey(regKey);
+    const live = (sid && players[sid]) || {};
+    return { key: regKey, name: p.name || 'Player', playerId: p.playerId || '??????', pfp: p.pfp || '', skin: (typeof live.skin === 'string' ? live.skin : ''), gun1: (live.gun1 === 'vita' ? 'vita' : 'ar9'), ready: (live.ready === true) };
+}
+function lobbyGroupKeys(hostKey) {
+    const keys = [hostKey];
+    Object.keys(players).forEach((id) => {
+        const p = players[id];
+        if (p && p.lobbyWith === hostKey && keys.indexOf(p.regKey) === -1) keys.push(p.regKey);
+    });
+    return keys;
+}
+function sendLobbyUpdate(hostKey) {
+    // Har member ko uski view bhejo — khud ko chhor kar baaki members.
+    const keys = lobbyGroupKeys(hostKey);
+    const host = registeredPlayers[hostKey] || {};
+    keys.forEach((k) => {
+        const sid = findSocketIdByRegKey(k);
+        if (!sid) return;
+        const members = keys.filter((mk) => mk !== k).map(publicLobbyMember).filter((m) => registeredPlayers[m.key]);
+        const youReady = !!(players[sid] && players[sid].ready === true);
+        try { io.to(sid).emit('lobbyUpdate', { hostKey, hostName: host.name || 'Player', youAreHost: k === hostKey, youReady, members }); } catch (e) {}
+    });
+}
+function sendEmptyLobbyUpdate(regKey) {
+    // Tum akeli apni lobby me ho (group khatam).
+    const sid = findSocketIdByRegKey(regKey);
+    if (!sid) return;
+    const youReady = !!(players[sid] && players[sid].ready === true);
+    try { io.to(sid).emit('lobbyUpdate', { hostKey: regKey, hostName: (registeredPlayers[regKey] || {}).name || 'Player', youAreHost: true, youReady, members: [] }); } catch (e) {}
+}
+function leaveLobbyGroup(regKey) {
+    // Player apni lobby group se nikal jaye; agar wo host tha to uski
+    // lobby dissolve — baaki members apni khali lobby me wapas.
+    const sid = findSocketIdByRegKey(regKey);
+    const me = sid ? players[sid] : null;
+    if (me) me.ready = false; // group se nikla — ready khatam.
+    if (me && me.lobbyWith) {
+        const hostKey = me.lobbyWith;
+        me.lobbyWith = null;
+        sendLobbyUpdate(hostKey);
+    }
+    const hosted = lobbyGroupKeys(regKey).filter((k) => k !== regKey);
+    if (hosted.length) {
+        hosted.forEach((k) => {
+            const s = findSocketIdByRegKey(k);
+            if (s && players[s]) { players[s].lobbyWith = null; players[s].ready = false; }
+        });
+        hosted.forEach((k) => sendEmptyLobbyUpdate(k));
+    }
+}
+function areFriends(a, b) {
+    return Array.isArray(friendsData.friendships[a]) && friendsData.friendships[a].indexOf(b) !== -1;
+}
+function hasPendingRequest(fromKey, toKey) {
+    return friendsData.requests.some((r) => r && r.fromKey === fromKey && r.toKey === toKey);
+}
+function addFriendship(a, b) {
+    if (!Array.isArray(friendsData.friendships[a])) friendsData.friendships[a] = [];
+    if (!Array.isArray(friendsData.friendships[b])) friendsData.friendships[b] = [];
+    if (friendsData.friendships[a].indexOf(b) === -1) friendsData.friendships[a].push(b);
+    if (friendsData.friendships[b].indexOf(a) === -1) friendsData.friendships[b].push(a);
+}
+function removeFriendship(a, b) {
+    if (Array.isArray(friendsData.friendships[a])) friendsData.friendships[a] = friendsData.friendships[a].filter((k) => k !== b);
+    if (Array.isArray(friendsData.friendships[b])) friendsData.friendships[b] = friendsData.friendships[b].filter((k) => k !== a);
+}
+function sendFriendsUpdate(regKey) {
+    const sid = findSocketIdByRegKey(regKey);
+    if (!sid) return;
+    const friends = (friendsData.friendships[regKey] || []).map(publicFriendProfile).filter((f) => registeredPlayers[f.key]);
+    const requests = friendsData.requests.filter((r) => r && r.toKey === regKey).map((r) => publicFriendProfile(r.fromKey)).filter((f) => registeredPlayers[f.key]);
+    try { io.to(sid).emit('friendsUpdate', { friends, requests }); } catch (e) {}
+}
+function notifyFriendsOf(regKey) {
+    // Is player ke friends ko update bhejo (online/offline status ke liye).
+    const list = friendsData.friendships[regKey] || [];
+    list.forEach((fk) => sendFriendsUpdate(fk));
+}
+
 // 🏁 MATCH END — timer 0 hote hi 'matchEnded' (clients rewards save
 // karen + apne stats bhejen), 1.5s baad leaderboard ('matchResults')
 // broadcast + match stats reset (agle match ke liye).
@@ -125,7 +256,7 @@ function buildMatchLeaderboard() {
             return {
                 socketId: id,
                 name: p.name || 'Player',
-                playerId: p.playerId || '?????',
+                playerId: p.playerId || '??????',
                 pfp: p.pfp || '',
                 kills: p.matchKills || 0,
                 deaths: p.matchDeaths || 0,
@@ -184,6 +315,7 @@ io.on('connection', (socket) => {
         isMoving: false,
         isCrouching: false,
         isDoingPushups: false, // 💪 Pushups (P) — client se aata hai, baaki players ko dikhta hai.
+        ready: false, // ✅ Lobby READY — game start ke liye tayyar (party PLAY ke liye sab ready hone chahiye).
         gun1: 'ar9', // 🎒 Slot 1 gun — 'ar9' ya 'vita' (sniper). Client se aata hai, baaki players ko dikhta hai.
         // 🆔 Player ID (# + 5 chars, letters + numbers) + 🌍 W.W.P profile.
         playerId: '', // setPlayerProfile se aata hai (client ki per-account ID).
@@ -232,8 +364,8 @@ io.on('connection', (socket) => {
     // broadcast karta hai (admin ka W.W.P panel usi se bharta hai).
     socket.on('setPlayerProfile', (profile) => {
         if (!players[socket.id] || !profile || typeof profile !== 'object') return;
-        const pid = String(profile.id || '').toUpperCase().replace(/[^A-Z0-9]/g, '').substring(0, 5);
-        if (!/^[A-Z0-9]{5}$/.test(pid)) return; // galat ID — ignore karo.
+        const pid = String(profile.id || '').replace(/[^0-9]/g, '').substring(0, 6);
+        if (!/^[0-9]{6}$/.test(pid)) return; // galat ID — ignore karo.
         const key = playerRegKey(profile, pid);
         // ID pehle se kisi AUR registered player ki to nahi? (takrao — client nayi ID banaye.)
         const taken = Object.keys(registeredPlayers).some((k) => k !== key && registeredPlayers[k] && registeredPlayers[k].playerId === pid);
@@ -277,6 +409,11 @@ io.on('connection', (socket) => {
                 setTimeout(() => { try { socket.emit('giftReceived', g); } catch (e) {} }, 400 * (i + 1));
             });
         }
+        // 👥 Friends — login par apni friends list + pending requests bhejo
+        // (offline me aayi requests F.Req me dikh jayengi). Friends ko bhi
+        // online status update bhejo.
+        sendFriendsUpdate(key);
+        notifyFriendsOf(key);
     });
 
     // 👑 ADMIN ACTIONS — Ban / Disable / Enable / Unban (sirf admin).
@@ -321,6 +458,176 @@ io.on('connection', (socket) => {
         const where = deliverGiftToPlayer(key, clean);
         if (where === 'notfound') { try { socket.emit('giftFailed', { reason: 'no-player' }); } catch (e) {} return; }
         try { socket.emit('giftSent', { key, gift: clean, where }); } catch (e) {}
+    });
+
+    // 👥 FRIEND REQUEST — client #ID bhejta hai (6 digits),
+    // server us ID wala player dhoondta hai aur request bhejta hai.
+    socket.on('sendFriendRequest', (data) => {
+        if (!players[socket.id]) return;
+        const myKey = players[socket.id].regKey;
+        if (!myKey) return;
+        const pid = String((data && data.playerId) || '').replace(/[^0-9]/g, '').substring(0, 6);
+        if (!/^[0-9]{6}$/.test(pid)) { try { socket.emit('friendRequestResult', { ok: false, reason: 'bad-id' }); } catch (e) {} return; }
+        const targetKey = findRegKeyByPlayerId(pid);
+        if (!targetKey) { try { socket.emit('friendRequestResult', { ok: false, reason: 'not-found' }); } catch (e) {} return; }
+        if (targetKey === myKey) { try { socket.emit('friendRequestResult', { ok: false, reason: 'self' }); } catch (e) {} return; }
+        if (areFriends(myKey, targetKey)) { try { socket.emit('friendRequestResult', { ok: false, reason: 'already-friends' }); } catch (e) {} return; }
+        if (hasPendingRequest(myKey, targetKey)) { try { socket.emit('friendRequestResult', { ok: false, reason: 'already-sent' }); } catch (e) {} return; }
+        // Ulti taraf se request pehle se aayi hui ho to seedha friends ban jao.
+        if (hasPendingRequest(targetKey, myKey)) {
+            friendsData.requests = friendsData.requests.filter((r) => !(r && r.fromKey === targetKey && r.toKey === myKey));
+            addFriendship(myKey, targetKey);
+            saveFriendsData();
+            sendFriendsUpdate(myKey);
+            sendFriendsUpdate(targetKey);
+            try { socket.emit('friendRequestResult', { ok: true, reason: 'accepted-mutual' }); } catch (e) {}
+            const sid = findSocketIdByRegKey(targetKey);
+            if (sid) { try { io.to(sid).emit('friendRequestAccepted', { by: publicFriendProfile(myKey) }); } catch (e) {} }
+            return;
+        }
+        friendsData.requests.push({ fromKey: myKey, toKey: targetKey, at: Date.now() });
+        saveFriendsData();
+        try { socket.emit('friendRequestResult', { ok: true, reason: 'sent' }); } catch (e) {}
+        // Target online ho to foran batao, offline ho to pending rehti hai (login par milegi).
+        sendFriendsUpdate(targetKey);
+        const sid = findSocketIdByRegKey(targetKey);
+        if (sid) { try { io.to(sid).emit('friendRequestReceived', { from: publicFriendProfile(myKey) }); } catch (e) {} }
+    });
+
+    // 👥 FRIEND REQUEST ACCEPT / DECLINE — sirf jis ko request aayi wo jawab de sakta hai.
+    socket.on('respondFriendRequest', (data) => {
+        if (!players[socket.id]) return;
+        const myKey = players[socket.id].regKey;
+        if (!myKey || !data || typeof data !== 'object') return;
+        const fromKey = String(data.fromKey || '').trim();
+        const accept = !!data.accept;
+        if (!fromKey || !registeredPlayers[fromKey]) return;
+        const idx = friendsData.requests.findIndex((r) => r && r.fromKey === fromKey && r.toKey === myKey);
+        if (idx === -1) return; // aisi koi request nahi hai.
+        friendsData.requests.splice(idx, 1);
+        if (accept) addFriendship(myKey, fromKey);
+        saveFriendsData();
+        sendFriendsUpdate(myKey);
+        sendFriendsUpdate(fromKey);
+        const sid = findSocketIdByRegKey(fromKey);
+        if (sid) {
+            try { io.to(sid).emit(accept ? 'friendRequestAccepted' : 'friendRequestDeclined', { by: publicFriendProfile(myKey) }); } catch (e) {}
+        }
+    });
+
+    // ❌ REMOVE FRIEND — dono taraf se dosti hatao, dono ko friendsUpdate bhejo.
+    socket.on('removeFriend', (data) => {
+        if (!players[socket.id]) return;
+        const myKey = players[socket.id].regKey;
+        if (!myKey || !data || typeof data !== 'object') return;
+        const targetKey = String(data.key || '').trim();
+        if (!targetKey || !registeredPlayers[targetKey]) return;
+        if (!areFriends(myKey, targetKey)) { try { socket.emit('removeFriendResult', { ok: false, reason: 'not-friends' }); } catch (e) {} return; }
+        removeFriendship(myKey, targetKey);
+        // Usi player ki doosri key (purana browser / purani app.js — regKey badal
+        // gaya ho) se dosti bhi hatao, warna friend doosri key se wapas aa jata hai.
+        const targetPid = (registeredPlayers[targetKey] || {}).playerId || '';
+        if (targetPid) {
+            Object.keys(registeredPlayers).forEach((k) => {
+                if (k !== targetKey && registeredPlayers[k] && registeredPlayers[k].playerId === targetPid) removeFriendship(myKey, k);
+            });
+        }
+        // Dono ke beech ki pending requests bhi saaf karo (warna Accept se dosti wapas aa jaye).
+        friendsData.requests = friendsData.requests.filter((r) => !(r && ((r.fromKey === myKey && r.toKey === targetKey) || (r.fromKey === targetKey && r.toKey === myKey))));
+        if (!saveFriendsData()) {
+            // Save nahi hua — removal wapas lo, warna restart par friend wapas aa jayega.
+            addFriendship(myKey, targetKey);
+            try { socket.emit('removeFriendResult', { ok: false, reason: 'save-failed' }); } catch (e) {} return;
+        }
+        // 👥 Dost nahi rahe to shared lobby bhi khatam (dono taraf se).
+        leaveLobbyGroup(myKey);
+        leaveLobbyGroup(targetKey);
+        console.log('❌ ' + (players[socket.id].name || myKey) + ' removed friend ' + (registeredPlayers[targetKey].name || targetKey));
+        sendFriendsUpdate(myKey);
+        sendFriendsUpdate(targetKey);
+        try { socket.emit('removeFriendResult', { ok: true, removed: publicFriendProfile(targetKey) }); } catch (e) {}
+        const sid = findSocketIdByRegKey(targetKey);
+        if (sid) { try { io.to(sid).emit('friendRemoved', { by: publicFriendProfile(myKey) }); } catch (e) {} }
+    });
+
+    // 🎮 PLAYER STATE — game me ho ya lobby me (Friends list me Join ke liye).
+    socket.on('playerState', (data) => {
+        if (!players[socket.id]) return;
+        const myKey = players[socket.id].regKey;
+        if (!myKey || !data || typeof data !== 'object') return;
+        players[socket.id].inGame = data.inGame === true;
+        // Game me gaya — lobby group se nikal jao (host tha to lobby dissolve).
+        if (players[socket.id].inGame) leaveLobbyGroup(myKey);
+        // Mere friends ko mera naya status batao (Join button / Game me wali line ke liye).
+        notifyFriendsOf(myKey);
+    });
+
+    // 👥 JOIN LOBBY — dost ki lobby me khade ho jao (uska character side pe,
+    // apna beech me). Game start NAHI hota — sirf lobby share hoti hai.
+    socket.on('joinLobby', (data) => {
+        if (!players[socket.id]) return;
+        const myKey = players[socket.id].regKey;
+        if (!myKey || !data || typeof data !== 'object') return;
+        const targetKey = String(data.key || '').trim();
+        if (!targetKey || !registeredPlayers[targetKey]) { try { socket.emit('joinLobbyResult', { ok: false, reason: 'not-found' }); } catch (e) {} return; }
+        if (targetKey === myKey) { try { socket.emit('joinLobbyResult', { ok: false, reason: 'self' }); } catch (e) {} return; }
+        if (!isPlayerOnline(targetKey)) { try { socket.emit('joinLobbyResult', { ok: false, reason: 'offline' }); } catch (e) {} return; }
+        if (isPlayerInGame(targetKey)) { try { socket.emit('joinLobbyResult', { ok: false, reason: 'in-game' }); } catch (e) {} return; }
+        // Root host nikalo — agar target kisi aur ki lobby me hai to usi host ki lobby join hogi.
+        const targetSid = findSocketIdByRegKey(targetKey);
+        const targetLobbyWith = (targetSid && players[targetSid] && players[targetSid].lobbyWith) || null;
+        const hostKey = targetLobbyWith || targetKey;
+        if (hostKey === myKey) { try { socket.emit('joinLobbyResult', { ok: false, reason: 'already-there' }); } catch (e) {} return; }
+        if (players[socket.id].lobbyWith === hostKey) { try { socket.emit('joinLobbyResult', { ok: false, reason: 'already-there' }); } catch (e) {} return; }
+        players[socket.id].lobbyWith = hostKey;
+        try { socket.emit('joinLobbyResult', { ok: true, hostKey, hostName: (registeredPlayers[hostKey] || {}).name || 'Player' }); } catch (e) {}
+        sendLobbyUpdate(hostKey);
+        // Host ko batao: koi uski lobby me aa gaya.
+        const hostSid = findSocketIdByRegKey(hostKey);
+        if (hostSid && hostSid !== socket.id) { try { io.to(hostSid).emit('lobbyJoined', { by: publicFriendProfile(myKey) }); } catch (e) {} }
+    });
+
+    // 🚪 LEAVE LOBBY — dost ki lobby se nikal kar apni khud ki lobby me wapas.
+    socket.on('leaveLobby', () => {
+        if (!players[socket.id]) return;
+        const myKey = players[socket.id].regKey;
+        if (!myKey) return;
+        const hostKey = players[socket.id].lobbyWith;
+        if (!hostKey) return;
+        leaveLobbyGroup(myKey);
+        sendEmptyLobbyUpdate(myKey);
+        const hostSid = findSocketIdByRegKey(hostKey);
+        if (hostSid) { try { io.to(hostSid).emit('lobbyLeft', { by: publicFriendProfile(myKey) }); } catch (e) {} }
+    });
+
+    // ✅ READY — lobby me PLAY dabane se pehle sab ko ready hona zaroori hai.
+    socket.on('setReady', (data) => {
+        if (!players[socket.id]) return;
+        const myKey = players[socket.id].regKey;
+        if (!myKey || !data || typeof data !== 'object') return;
+        players[socket.id].ready = data.ready === true;
+        // Apni group ko + friends ko naya ready status batao.
+        const hostKey = players[socket.id].lobbyWith || myKey;
+        sendLobbyUpdate(hostKey);
+        notifyFriendsOf(myKey);
+    });
+
+    // 🎮 PARTY PLAY — PLAY dabao; sab ready hain to baaki members ko bhi game start ka signal.
+    socket.on('partyPlay', () => {
+        if (!players[socket.id]) return;
+        const myKey = players[socket.id].regKey;
+        if (!myKey) return;
+        const hostKey = players[socket.id].lobbyWith || myKey;
+        const keys = lobbyGroupKeys(hostKey);
+        if (keys.length <= 1) { try { socket.emit('partyPlayResult', { ok: false, reason: 'solo' }); } catch (e) {} return; }
+        const notReady = keys.filter((k) => !isPlayerReady(k)).map((k) => (registeredPlayers[k] || {}).name || 'Player');
+        if (notReady.length) { try { socket.emit('partyPlayResult', { ok: false, reason: 'not-ready', notReady }); } catch (e) {} return; }
+        keys.forEach((k) => {
+            if (k === myKey) return;
+            const sid = findSocketIdByRegKey(k);
+            if (sid) { try { io.to(sid).emit('partyGameStart', { by: publicFriendProfile(myKey) }); } catch (e) {} }
+        });
+        try { socket.emit('partyPlayResult', { ok: true }); } catch (e) {}
     });
 
     // 🌟 Chat Message Handler - SIRF EK BAAR (doosra duplicate wala block DELETE karo)
@@ -450,6 +757,9 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         console.log(`Player disconnected: ${socket.id}`);
         const playerName = players[socket.id] ? players[socket.id].name : 'Player';
+        const discRegKey = players[socket.id] ? players[socket.id].regKey : '';
+        // 👥 Shared lobby se nikal jao (host tha to lobby dissolve).
+        if (discRegKey) leaveLobbyGroup(discRegKey);
         delete players[socket.id];
         
         // 🌟 Screenshot ke mutabiq left notification (Red color text ke liye)
@@ -458,6 +768,8 @@ io.on('connection', (socket) => {
         // 🌍 W.W.P — PERMANENT: gaya hua player registry se NAHI hat-ta,
         // sirf offline ho jata hai (list broadcast se online dot update hota hai).
         broadcastPlayersList();
+        // 👥 Friends — iske friends ko online status update bhejo.
+        if (discRegKey) notifyFriendsOf(discRegKey);
     });
 });
 
